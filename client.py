@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 NDJSON client: interactive, pipe-friendly, one-shot; robust connection retry.
-Type 'exit', 'quit', or ':q' to close (sends 'bye').
+Type 'EXIT', 'exit', 'quit', or ':q' to close (sends 'bye').
 """
 
 import argparse
@@ -61,12 +61,14 @@ def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
         print("[server]", hello)
 
     if sys.stdin.isatty():
-        print(f"[client] type lines to send (action={action}); type 'exit' to quit")
+        print(f"[client] type lines to send (action={action}); type 'EXIT' to quit")
 
     try:
         for line in sys.stdin:
             text = line.rstrip("\r\n")
-            if text.strip() in {"exit", "quit", ":q"}:
+            # Accept EXIT in any case; also accept 'quit' and ':q'
+            normalized = text.strip()
+            if normalized.upper() == "EXIT" or normalized in {"quit", ":q"}:
                 break
             send_json_line(fw, {"action": action, "payload": text})
             resp = recv_json_line(fr)
