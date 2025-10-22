@@ -248,7 +248,7 @@ def _load_client_config(path: Optional[Path]) -> Dict[str, Any]:
         print(f"[client] failed to load config: {e}", file=sys.stderr)
     return defaults
 
-# ---------------- Main ----------------
+# ---------------- Main -----------------
 def main():
     # Optional: --config <path>
     cfg_path: Optional[Path] = None
