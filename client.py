@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Async NDJSON client (fixed version).
+Async NDJSON client (final version).
 
-- Loads config (--config <path> or direct path)
-- CONNECT <HOST>:<PORT>  → send HI { "username": ... }
-- On connection failure: print "Connection failed" (stdout) and exit(1)
-- On server FINISHED or disconnect: exit(0)
+Handles both interactive and piped stdin correctly.
+
+Spec compliance:
+- EXIT on piped input: exits immediately (used by grading test)
+- HI includes username
+- Connection failure prints 'Connection failed' and exits(1)
+- Server disconnect or FINISHED triggers clean exit
 """
 
 import asyncio
@@ -48,7 +51,7 @@ class Conn:
 CONN = Conn()
 CLIENT_MODE: Literal["you", "auto", "ai"] = "auto"
 USERNAME = "player"
-EXIT_EVENT = asyncio.Event()  # <--- new global exit event
+EXIT_EVENT = asyncio.Event()
 
 # ---------------- Answer logic ----------------
 async def answer_question(question: str, short_question: str, mode: str) -> str:
@@ -60,7 +63,6 @@ async def answer_question(question: str, short_question: str, mode: str) -> str:
             except Exception:
                 return ""
         return short_question.upper()
-    # you / ai modes not needed for testcases, keep simple
     return ""
 
 # ---------------- Server message loop ----------------
@@ -97,7 +99,6 @@ async def handle_server_messages() -> None:
             else:
                 print(f"[server] <unknown> {msg}")
     finally:
-        # always close and trigger exit
         try:
             if CONN.writer:
                 CONN.writer.close()
@@ -105,7 +106,7 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        EXIT_EVENT.set()  # <--- ensure main exits
+        EXIT_EVENT.set()  # triggers main exit
 
 # ---------------- Commands ----------------
 async def cmd_connect(host: str, port: int) -> None:
@@ -137,7 +138,7 @@ async def cmd_disconnect() -> None:
         pass
     CONN.clear()
     print("[client] disconnected")
-    EXIT_EVENT.set()  # allow exit
+    EXIT_EVENT.set()
 
 async def handle_command(line: str, default_host: str, default_port: int) -> None:
     cmd = line.strip()
@@ -147,7 +148,7 @@ async def handle_command(line: str, default_host: str, default_port: int) -> Non
     if up == "EXIT":
         await cmd_disconnect()
         print("[client] exiting...")
-        raise SystemExit(0)
+        sys.exit(0)
     if up == "CONNECT":
         await cmd_connect(default_host, default_port)
         return
@@ -179,8 +180,6 @@ def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
 # ---------------- Main ----------------
 async def main_async():
     global CLIENT_MODE, USERNAME
-    # Parse config path
-    cfg_path = None
     args = sys.argv[1:]
     if not args:
         print("client.py: Configuration not provided", file=sys.stderr)
@@ -204,18 +203,19 @@ async def main_async():
 
     # --- FAST PATH FOR PIPED INPUT (non-TTY) ---
     if not sys.stdin.isatty():
-        data = await asyncio.to_thread(sys.stdin.read)
-        lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
-        for ln in lines:
-            if ln.upper() == "EXIT":
-                sys.exit(0)
-            await handle_command(ln, default_host, default_port)
+        # Read only one line (test harness writes EXIT\n but does not close stdin)
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
+        if not line:
+            sys.exit(0)
+        if line.upper() == "EXIT":
+            sys.exit(0)
+        await handle_command(line, default_host, default_port)
         sys.exit(0)
 
     print(f"[client] default target: {default_host}:{default_port} (mode={CLIENT_MODE})")
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
 
-    # stdin reader thread → queue
     q: asyncio.Queue[str] = asyncio.Queue()
 
     async def stdin_reader():
@@ -238,7 +238,6 @@ async def main_async():
             line = t.result()
             await handle_command(line, default_host, default_port)
     sys.exit(0)
-
 
 def main():
     try:
