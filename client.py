@@ -1,44 +1,35 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-A minimal NDJSON client for the companion server.
-支持三种使用方式：
-1) 交互：直接运行后逐行输入；每行作为 payload 发送（默认 action=echo）
-2) 管道：echo hello | python client.py  （从 stdin 读多行发送）
-3) 单次：python client.py --send "hello world" --action upper
+NDJSON client: interactive, pipe-friendly, one-shot; robust connection retry.
+Type 'exit', 'quit', or ':q' to close (sends 'bye').
 """
 
 import argparse
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, IO, Optional
 
-
 def load_config(path: Optional[Path]) -> Dict[str, Any]:
-    default = {
+    defaults = {
         "host": "127.0.0.1",
         "port": 5050,
-        "read_timeout": 300,
-        "write_timeout": 300,
     }
     if path is None:
-        return default
+        return defaults
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        default.update(data or {})
-        return default
+        defaults.update(data or {})
     except Exception as e:
         print(f"[client] Failed to load config {path}: {e}", file=sys.stderr)
-        return default
-
+    return defaults
 
 def send_json_line(fw: IO[bytes], obj: Dict[str, Any]) -> None:
-    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    fw.write(line)
+    fw.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
     fw.flush()
-
 
 def recv_json_line(fr: IO[bytes]) -> Optional[Dict[str, Any]]:
     line = fr.readline()
@@ -47,8 +38,22 @@ def recv_json_line(fr: IO[bytes]) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(line.decode("utf-8"))
     except json.JSONDecodeError:
-        return {"action": "error", "error": "invalid_json", "raw": line.decode("utf-8", "ignore")}
+        return {"action": "error", "error": "invalid_json"}
 
+def connect_with_retry(host: str, port: int, max_wait: float = 30.0) -> socket.socket:
+    start = time.time()
+    delay = 0.2
+    last_err = None
+    while True:
+        try:
+            return socket.create_connection((host, port), timeout=5)
+        except OSError as e:
+            last_err = e
+            elapsed = time.time() - start
+            if elapsed >= max_wait:
+                raise last_err
+            time.sleep(delay)
+            delay = min(delay * 1.5, 2.0)
 
 def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
     hello = recv_json_line(fr)
@@ -56,12 +61,14 @@ def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
         print("[server]", hello)
 
     if sys.stdin.isatty():
-        print(f"[client] type lines to send as payload (action={action}); Ctrl+C to quit")
+        print(f"[client] type lines to send (action={action}); type 'exit' to quit")
 
     try:
         for line in sys.stdin:
-            line = line.rstrip("\r\n")
-            send_json_line(fw, {"action": action, "payload": line})
+            text = line.rstrip("\r\n")
+            if text.strip() in {"exit", "quit", ":q"}:
+                break
+            send_json_line(fw, {"action": action, "payload": text})
             resp = recv_json_line(fr)
             if resp is None:
                 print("[client] server closed")
@@ -70,45 +77,56 @@ def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        send_json_line(fw, {"action": "bye"})
-        bye = recv_json_line(fr)
-        if bye:
-            print("[server]", bye)
+        try:
+            send_json_line(fw, {"action": "bye"})
+            _ = recv_json_line(fr)
+        except Exception:
+            pass
     return 0
 
-
 def oneshot(fr: IO[bytes], fw: IO[bytes], action: str, payload: str) -> int:
-    hello = recv_json_line(fr)
-    if hello:
-        print("[server]", hello)
+    _ = recv_json_line(fr)  # hello
     send_json_line(fw, {"action": action, "payload": payload})
     resp = recv_json_line(fr)
     if resp:
         print(resp)
-    send_json_line(fw, {"action": "bye"})
-    _ = recv_json_line(fr)
+    try:
+        send_json_line(fw, {"action": "bye"})
+        _ = recv_json_line(fr)
+    except Exception:
+        pass
     return 0
-
 
 def main():
     ap = argparse.ArgumentParser(description="NDJSON TCP client")
-    ap.add_argument("--config", type=Path, help="Path to JSON config file", default=None)
+    ap.add_argument("--config", type=Path, default=None, help="Path to JSON config")
+    ap.add_argument("--host", type=str, help="Override host")
+    ap.add_argument("--port", type=int, help="Override port")
     ap.add_argument("--action", type=str, default="echo", help="Action name (echo|upper|ping|...)")
     ap.add_argument("--send", type=str, help="Send a single payload then exit")
+    ap.add_argument("--no-retry", action="store_true", help="Do not retry connection")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    host = cfg["host"]
-    port = int(cfg["port"])
+    host = args.host or cfg["host"]
+    port = int(args.port or cfg["port"])
 
-    with socket.create_connection((host, port), timeout=10) as sock:
+    try:
+        if args.no_retry:
+            sock = socket.create_connection((host, port), timeout=5)
+        else:
+            sock = connect_with_retry(host, port, max_wait=30.0)
+    except OSError as e:
+        print(f"[client] could not connect to {host}:{port} - {e}", file=sys.stderr)
+        sys.exit(1)
+
+    with sock:
         fr = sock.makefile("rb")
         fw = sock.makefile("wb")
         if args.send is not None:
-            return sys.exit(oneshot(fr, fw, args.action, args.send))
+            sys.exit(oneshot(fr, fw, args.action, args.send))
         else:
-            return sys.exit(interactive_loop(fr, fw, args.action))
-
+            sys.exit(interactive_loop(fr, fw, args.action))
 
 if __name__ == "__main__":
     main()
