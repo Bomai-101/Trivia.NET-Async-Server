@@ -204,12 +204,22 @@ async def handle_command(line: str, default_host: str, default_port: int) -> Non
         return
     print("[client] unknown command")
 
-# ------------- Stdin reader (async-friendly) -------------
+# ------------- Stdin reader (fixed) -------------
 async def stdin_to_queue(q: asyncio.Queue[str]) -> None:
-    # Read stdin lines in a background thread to avoid blocking the event loop.
+    """
+    Bridge blocking sys.stdin reads into the asyncio loop without requiring
+    a loop in the worker thread. We capture the main loop and use
+    loop.call_soon_threadsafe(q.put_nowait, line).
+    """
+    loop = asyncio.get_running_loop()
+
     def _reader():
         for raw in sys.stdin:
-            asyncio.run_coroutine_threadsafe(q.put(raw.rstrip("\r\n")), asyncio.get_event_loop())
+            line = raw.rstrip("\r\n")
+            # Schedule a thread-safe enqueue into the asyncio queue
+            loop.call_soon_threadsafe(q.put_nowait, line)
+
+    # Run blocking reader in a thread
     await asyncio.to_thread(_reader)
 
 # ------------- Config -------------
@@ -244,7 +254,7 @@ async def main_async():
     q: asyncio.Queue[str] = asyncio.Queue()
     asyncio.create_task(stdin_to_queue(q))
 
-    # Small fast-path: if first line is EXIT, gracefully exit
+    # Fast path: first line (if any) — handle immediately (e.g., EXIT)
     try:
         line = await asyncio.wait_for(q.get(), timeout=0.5)
         await handle_command(line, default_host, default_port)
@@ -260,7 +270,7 @@ def main():
     try:
         asyncio.run(main_async())
     except SystemExit:
-        # Normal graceful exit via EXIT command
+        # Graceful exit via EXIT command
         pass
     except KeyboardInterrupt:
         pass
