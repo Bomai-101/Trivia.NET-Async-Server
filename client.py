@@ -1,114 +1,114 @@
-# client.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+A minimal NDJSON client for the companion server.
+支持三种使用方式：
+1) 交互：直接运行后逐行输入；每行作为 payload 发送（默认 action=echo）
+2) 管道：echo hello | python client.py  （从 stdin 读多行发送）
+3) 单次：python client.py --send "hello world" --action upper
+"""
+
+import argparse
 import json
 import socket
 import sys
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, IO, Optional
 
-# ---------- 基础工具 / Utilities ----------
 
-def send_json_from_client(sock: socket.socket, message: Dict[str, Any]) -> None:
-    """
-    客户端发送：JSON（不加换行）
-    Client messages must NOT end with newline.
-    """
-    data = json.dumps(message)
-    sock.sendall(data.encode("utf-8"))
-
-def recv_json_line_from_server(sock: socket.socket) -> Dict[str, Any] | None:
-    """
-    服务器消息以 '\n' 结尾，这里读到换行为止，再 json.loads。
-    Server messages end with newline; read until '\n'.
-    """
-    buffer = b""
-    sock.settimeout(120)
-    while True:
-        chunk = sock.recv(1)
-        if not chunk:
-            return None
-        buffer += chunk
-        if buffer.endswith(b"\n"):
-            try:
-                text = buffer.decode("utf-8").rstrip("\n")
-                return json.loads(text)
-            except json.JSONDecodeError:
-                # 出现解析错误继续累积（理论上不应发生）
-                buffer += b""
-
-# ---------- 配置加载 / Config loader ----------
-
-def load_config() -> Dict[str, Any]:
-    if len(sys.argv) != 3 or sys.argv[1] != "--config":
-        print("Usage: python client.py --config <config_path>", file=sys.stderr)
-        sys.exit(1)
-    config_path = sys.argv[2]
+def load_config(path: Optional[Path]) -> Dict[str, Any]:
+    default = {
+        "host": "127.0.0.1",
+        "port": 5050,
+        "read_timeout": 300,
+        "write_timeout": 300,
+    }
+    if path is None:
+        return default
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        print(f"Config file '{config_path}' not found.", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"Invalid JSON in '{config_path}': {e}", file=sys.stderr)
-        sys.exit(1)
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        default.update(data or {})
+        return default
+    except Exception as e:
+        print(f"[client] Failed to load config {path}: {e}", file=sys.stderr)
+        return default
 
-# ---------- 主流程 / Main flow ----------
+
+def send_json_line(fw: IO[bytes], obj: Dict[str, Any]) -> None:
+    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+    fw.write(line)
+    fw.flush()
+
+
+def recv_json_line(fr: IO[bytes]) -> Optional[Dict[str, Any]]:
+    line = fr.readline()
+    if not line:
+        return None
+    try:
+        return json.loads(line.decode("utf-8"))
+    except json.JSONDecodeError:
+        return {"action": "error", "error": "invalid_json", "raw": line.decode("utf-8", "ignore")}
+
+
+def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
+    hello = recv_json_line(fr)
+    if hello:
+        print("[server]", hello)
+
+    if sys.stdin.isatty():
+        print(f"[client] type lines to send as payload (action={action}); Ctrl+C to quit")
+
+    try:
+        for line in sys.stdin:
+            line = line.rstrip("\r\n")
+            send_json_line(fw, {"action": action, "payload": line})
+            resp = recv_json_line(fr)
+            if resp is None:
+                print("[client] server closed")
+                break
+            print(resp)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        send_json_line(fw, {"action": "bye"})
+        bye = recv_json_line(fr)
+        if bye:
+            print("[server]", bye)
+    return 0
+
+
+def oneshot(fr: IO[bytes], fw: IO[bytes], action: str, payload: str) -> int:
+    hello = recv_json_line(fr)
+    if hello:
+        print("[server]", hello)
+    send_json_line(fw, {"action": action, "payload": payload})
+    resp = recv_json_line(fr)
+    if resp:
+        print(resp)
+    send_json_line(fw, {"action": "bye"})
+    _ = recv_json_line(fr)
+    return 0
+
 
 def main():
-    config = load_config()
-    host = config.get("host", "127.0.0.1")
-    port = int(config.get("port", 5000))
-    username = config.get("username", "Alice")
-    mode = config.get("client_mode", "you")  # "you" | "auto"（这里两种都能跑）
+    ap = argparse.ArgumentParser(description="NDJSON TCP client")
+    ap.add_argument("--config", type=Path, help="Path to JSON config file", default=None)
+    ap.add_argument("--action", type=str, default="echo", help="Action name (echo|upper|ping|...)")
+    ap.add_argument("--send", type=str, help="Send a single payload then exit")
+    args = ap.parse_args()
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.connect((host, port))
-        print(f"[CLIENT] Connected to {host}:{port}")
+    cfg = load_config(args.config)
+    host = cfg["host"]
+    port = int(cfg["port"])
 
-        # 1) 发送 HI（不带换行）
-        send_json_from_client(sock, {"type": "HI", "username": username})
-        print(f"[CLIENT] Sent HI as {username}")
+    with socket.create_connection((host, port), timeout=10) as sock:
+        fr = sock.makefile("rb")
+        fw = sock.makefile("wb")
+        if args.send is not None:
+            return sys.exit(oneshot(fr, fw, args.action, args.send))
+        else:
+            return sys.exit(interactive_loop(fr, fw, args.action))
 
-        # 2) 循环接收服务器消息
-        while True:
-            msg = recv_json_line_from_server(sock)
-            if not msg:
-                print("[CLIENT] Server closed connection.")
-                break
-
-            mtype = msg.get("type")
-            print("[CLIENT] Received:", msg)
-
-            if mtype == "READY":
-                print("[CLIENT] Ready received. Waiting for question...")
-
-            elif mtype == "QUESTION":
-                short_q = msg.get("short_question", "")
-                trivia_q = msg.get("trivia_question", "")
-                print(f"[QUESTION] {trivia_q}")
-
-                if mode == "auto":
-                    # 最简单的“auto”：只支持 2+1 这种示例（演示用）
-                    # A tiny demo auto that handles the sample "2+1"
-                    answer = str(eval(short_q, {"__builtins__": {}}, {}))  # 演示用：请勿在正式作业用 eval
-                    print(f"[AUTO] Answered: {answer}")
-                else:
-                    answer = input("[YOU] Your answer: ").strip()
-
-                send_json_from_client(sock, {"type": "ANSWER", "answer": answer})
-
-            elif mtype == "RESULT":
-                print(f"[RESULT] {'✅ Correct' if msg.get('correct') else '❌ Incorrect'} - {msg.get('feedback','')}")
-
-            elif mtype == "FINISHED":
-                print("[CLIENT] Game over. Bye!")
-                break
-
-            else:
-                print("[CLIENT] Unknown message:", msg)
-
-    finally:
-        sock.close()
 
 if __name__ == "__main__":
     main()
