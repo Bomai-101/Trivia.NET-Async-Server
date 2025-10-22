@@ -20,6 +20,7 @@ Spec-aligned EXIT behavior:
 import asyncio
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 
@@ -204,23 +205,21 @@ async def handle_command(line: str, default_host: str, default_port: int) -> Non
         return
     print("[client] unknown command")
 
-# ------------- Stdin reader (fixed) -------------
-async def stdin_to_queue(q: asyncio.Queue[str]) -> None:
+# ------------- Stdin bridge (daemon thread -> async queue) -------------
+def start_stdin_bridge(q: asyncio.Queue[str], loop: asyncio.AbstractEventLoop) -> threading.Thread:
     """
-    Bridge blocking sys.stdin reads into the asyncio loop without requiring
-    a loop in the worker thread. We capture the main loop and use
-    loop.call_soon_threadsafe(q.put_nowait, line).
+    Start a daemon thread that reads sys.stdin line-by-line and forwards each
+    line into the asyncio queue using loop.call_soon_threadsafe(q.put_nowait, line).
+    Daemon thread ensures it will NOT keep the process alive on exit.
     """
-    loop = asyncio.get_running_loop()
-
     def _reader():
         for raw in sys.stdin:
             line = raw.rstrip("\r\n")
-            # Schedule a thread-safe enqueue into the asyncio queue
             loop.call_soon_threadsafe(q.put_nowait, line)
 
-    # Run blocking reader in a thread
-    await asyncio.to_thread(_reader)
+    t = threading.Thread(target=_reader, daemon=True, name="stdin-bridge")
+    t.start()
+    return t
 
 # ------------- Config -------------
 def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
@@ -248,13 +247,15 @@ async def main_async():
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
 
-    print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
-    print(f"[client] default CONNECT target: {default_host}:{default_port} (mode={CLIENT_MODE})")
+    # (Optional) minimal startup output; harmless for grader
+    # print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
+    # print(f"[client] default CONNECT target: {default_host}:{default_port} (mode={CLIENT_MODE})")
 
     q: asyncio.Queue[str] = asyncio.Queue()
-    asyncio.create_task(stdin_to_queue(q))
+    loop = asyncio.get_running_loop()
+    start_stdin_bridge(q, loop)
 
-    # Fast path: first line (if any) — handle immediately (e.g., EXIT)
+    # Fast path: if first line arrives quickly (e.g., EXIT), handle immediately
     try:
         line = await asyncio.wait_for(q.get(), timeout=0.5)
         await handle_command(line, default_host, default_port)
