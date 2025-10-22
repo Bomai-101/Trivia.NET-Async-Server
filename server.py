@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Minimal quiz server following the provided scaffold and function names.
+Async NDJSON quiz server.
 
 Protocol (NDJSON, one JSON per line):
-- Client → Server:
+Client -> Server:
   HI { "name": "<optional>" }
   ANSWER { "answer": "<string>" }
   BYE
-- Server → Client:
+Server -> Client:
   ACK { "player_id": "<str>" }
   READY { "round": <int>, "total_rounds": <int>, "question_seconds": <int> }
   QUESTION { "question_type": "<str>", "question": "<str>", "short_question": "<str>" }
   RESULT { "correct": <bool>, "feedback": "<str>", "score_delta": <int> }
-  LEADERBOARD { "state": "<str>", "scores": {"<player_id>": <int>, ...} }
+  LEADERBOARD { "state": "<str>", "scores": {"<player_name>": <int>, ...} }
   FINISHED { "scores": {...} }
   ERROR { "message": "<str>" }
 
-Config file (JSON), optional:
+Config (optional JSON):
 {
   "host": "127.0.0.1",
   "port": 5050,
@@ -27,274 +27,259 @@ Config file (JSON), optional:
 }
 """
 
+import asyncio
 import json
 import signal
-import socket
 import sys
-import threading
-import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, List, Tuple
 
-# ---------------- Global runtime state ----------------
+# ---------------- Runtime state ----------------
 SERVER_CFG: Dict[str, Any] = {}
 PLAYERS_REQUIRED = 2
 QUESTION_SECONDS = 10
 QUESTION_TYPES: List[str] = ["math:add", "upper"]
 
-# player_id -> {"conn": socket.socket, "name": str, "score": int, "alive": bool, "lock": threading.Lock()}
+# player_id -> {"writer": StreamWriter, "name": str, "score": int, "alive": bool}
 PLAYERS: Dict[str, Dict[str, Any]] = {}
-PLAYERS_LOCK = threading.Lock()
+PLAYERS_LOCK = asyncio.Lock()
 
-# round-scoped answers: player_id -> {"answer": str, "ts": float}
+# current round answers: player_id -> {"answer": str, "ts": float}
 CURRENT_ANSWERS: Dict[str, Dict[str, Any]] = {}
-CURRENT_ANSWERS_LOCK = threading.Lock()
+ANSWERS_LOCK = asyncio.Lock()
 
-STOP_EVENT = threading.Event()
-ROUND_EVENT = threading.Event()
+STOP_EVENT = asyncio.Event()
+ROUND_READY = asyncio.Event()
 
-# ---------------- Utility I/O ----------------
-def send_json_line(conn: socket.socket, obj: Dict[str, Any]) -> None:
-    line = (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-    conn.sendall(line)
+# ---------------- Utilities ----------------
+def _encode(obj: Dict[str, Any]) -> bytes:
+    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
-def recv_json_line(conn: socket.socket) -> Optional[Dict[str, Any]]:
-    # Read a single line (blocking)
-    buf = b""
-    while True:
-        ch = conn.recv(1)
-        if not ch:
-            if not buf:
-                return None
-            break
-        if ch == b"\n":
-            break
-        buf += ch
-    try:
-        return json.loads(buf.decode("utf-8"))
-    except json.JSONDecodeError:
-        return {"type": "ERROR", "message": "invalid_json", "raw": buf.decode("utf-8", "ignore")}
+async def send_line(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    writer.write(_encode(obj))
+    await writer.drain()
 
-def load_config(path: Optional[Path]) -> Dict[str, Any]:
+async def load_config(path: Optional[Path]) -> Dict[str, Any]:
     defaults = {
         "host": "127.0.0.1",
         "port": 5050,
         "players": 2,
         "question_seconds": 10,
-        "question_types": ["math:add", "upper"]
+        "question_types": ["math:add", "upper"],
     }
-    if path is None:
+    if not path:
         return defaults
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         defaults.update(data or {})
     except Exception as e:
         print(f"[server] Failed to load config: {e}", file=sys.stderr)
     return defaults
 
-# ---------------- Scaffolded functions ----------------
-def add_player(conn: socket.socket, addr: Tuple[str, int], name: Optional[str]) -> str:
-    """Register a player and return a player_id."""
+# ---------------- Scaffolded helpers ----------------
+async def add_player(writer: asyncio.StreamWriter, addr: Tuple[str, int], name: Optional[str]) -> str:
     pid = f"{addr[0]}:{addr[1]}"
-    with PLAYERS_LOCK:
+    async with PLAYERS_LOCK:
         if pid not in PLAYERS:
             PLAYERS[pid] = {
-                "conn": conn,
+                "writer": writer,
                 "name": name or pid,
                 "score": 0,
                 "alive": True,
-                "lock": threading.Lock(),
             }
     return pid
 
-def remove_player(player_id: str) -> None:
-    with PLAYERS_LOCK:
+async def remove_player(player_id: str) -> None:
+    async with PLAYERS_LOCK:
         info = PLAYERS.get(player_id)
         if info:
             info["alive"] = False
             try:
-                info["conn"].close()
+                info["writer"].close()
             except Exception:
                 pass
 
-def handle_player_answer(player_id: str, answer: str) -> None:
-    with CURRENT_ANSWERS_LOCK:
-        CURRENT_ANSWERS[player_id] = {"answer": answer, "ts": time.time()}
+async def handle_player_answer(player_id: str, answer: str) -> None:
+    async with ANSWERS_LOCK:
+        CURRENT_ANSWERS[player_id] = {"answer": answer, "ts": asyncio.get_event_loop().time()}
 
-def send_to_all_players(msg: Dict[str, Any]) -> None:
-    with PLAYERS_LOCK:
-        for pid, info in list(PLAYERS.items()):
+async def send_to_all_players(msg: Dict[str, Any]) -> None:
+    async with PLAYERS_LOCK:
+        dead = []
+        for pid, info in PLAYERS.items():
             if not info["alive"]:
                 continue
             try:
-                send_json_line(info["conn"], msg)
+                await send_line(info["writer"], msg)
             except Exception:
-                info["alive"] = False
+                dead.append(pid)
+        for pid in dead:
+            PLAYERS[pid]["alive"] = False
 
-def receive_answers(timeout_seconds: int) -> None:
-    """Block until all active players answered, or timeout expires."""
-    end = time.time() + timeout_seconds
-    while time.time() < end:
-        with PLAYERS_LOCK:
-            alive_players = [pid for pid, p in PLAYERS.items() if p["alive"]]
-        with CURRENT_ANSWERS_LOCK:
+async def receive_answers(timeout_seconds: int) -> None:
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_seconds
+    while loop.time() < deadline:
+        async with PLAYERS_LOCK:
+            alive = [pid for pid, p in PLAYERS.items() if p["alive"]]
+        async with ANSWERS_LOCK:
             got = set(CURRENT_ANSWERS.keys())
-        if got.issuperset(alive_players) and len(alive_players) > 0:
+        if alive and got.issuperset(alive):
             return
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
 
 def generate_leaderboard_state() -> str:
-    with PLAYERS_LOCK:
-        items = sorted(((p["name"], p["score"]) for p in PLAYERS.values()), key=lambda x: (-x[1], x[0]))
+    items = sorted(((p["name"], p["score"]) for p in PLAYERS.values() if p["alive"]),
+                   key=lambda x: (-x[1], x[0]))
     return ", ".join(f"{name}:{score}" for name, score in items)
 
 def generate_question(question_type: str) -> Dict[str, Any]:
-    """Return a dict with 'question', 'short_question', 'question_type'."""
     if question_type == "upper":
-        q = "Convert to UPPERCASE: hello world"
-        sq = "hello world"
-        return {"question_type": "upper", "question": q, "short_question": sq}
-    # default math:add
+        return {"question_type": "upper",
+                "question": "Convert to UPPERCASE: hello world",
+                "short_question": "hello world"}
     if question_type.startswith("math:add"):
         a, b = 3, 4
-        q = f"What is {a}+{b}?"
-        sq = f"{a}+{b}"
-        return {"question_type": "math:add", "question": q, "short_question": sq}
-    # fallback
+        return {"question_type": "math:add",
+                "question": f"What is {a}+{b}?",
+                "short_question": f"{a}+{b}"}
     return {"question_type": question_type, "question": "noop?", "short_question": "noop"}
 
 def generate_question_answer(question_type: str, short_question: str) -> str:
     if question_type == "upper":
         return short_question.upper()
     if question_type.startswith("math:add"):
-        # naive parser "X+Y"
         try:
-            parts = short_question.split("+")
-            return str(int(parts[0]) + int(parts[1]))
+            x, y = short_question.split("+")
+            return str(int(x) + int(y))
         except Exception:
             return ""
     return ""
 
-def start_game(total_rounds: int, question_seconds: int) -> None:
-    send_to_all_players({"type": "READY", "round": 0, "total_rounds": total_rounds, "question_seconds": question_seconds})
+async def start_game(total_rounds: int, question_seconds: int) -> None:
+    await send_to_all_players({"type": "READY", "round": 0,
+                               "total_rounds": total_rounds,
+                               "question_seconds": question_seconds})
 
-def start_round(round_idx: int, question_type: str) -> Dict[str, Any]:
+async def start_round(round_idx: int, question_type: str) -> Dict[str, Any]:
     q = generate_question(question_type)
-    msg = {"type": "QUESTION", **q}
-    send_to_all_players(msg)
+    await send_to_all_players({"type": "QUESTION", **q})
     return q
 
-def end_round(round_idx: int, total_rounds: int, award: Dict[str, int]) -> None:
-    # Send per-player RESULT (already sent inline in this implementation), then either LEADERBOARD or FINISHED
+async def end_round(round_idx: int, total_rounds: int) -> None:
     if round_idx + 1 < total_rounds:
         state = generate_leaderboard_state()
-        with PLAYERS_LOCK:
-            scores = {p["name"]: p["score"] for p in PLAYERS.values()}
-        send_to_all_players({"type": "LEADERBOARD", "state": state, "scores": scores})
+        scores = {p["name"]: p["score"] for p in PLAYERS.values() if p["alive"]}
+        await send_to_all_players({"type": "LEADERBOARD", "state": state, "scores": scores})
     else:
-        with PLAYERS_LOCK:
-            scores = {p["name"]: p["score"] for p in PLAYERS.values()}
-        send_to_all_players({"type": "FINISHED", "scores": scores})
+        scores = {p["name"]: p["score"] for p in PLAYERS.values() if p["alive"]}
+        await send_to_all_players({"type": "FINISHED", "scores": scores})
 
-# ---------------- Per-client thread ----------------
-def client_thread(conn: socket.socket, addr: Tuple[str, int]) -> None:
+# ---------------- Per-connection handler ----------------
+async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    addr = writer.get_extra_info("peername")
     pid = None
     try:
         while not STOP_EVENT.is_set():
-            msg = recv_json_line(conn)
-            if msg is None:
-                break
+            line = await reader.readline()
+            if not line:
+                break  # client socket received empty message -> disconnect
+            try:
+                msg = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                await send_line(writer, {"type": "ERROR", "message": "invalid_json"})
+                continue
+
             mtype = str(msg.get("type", "")).upper()
 
             if mtype == "HI":
                 name = msg.get("name")
-                pid = add_player(conn, addr, name)
-                send_json_line(conn, {"type": "ACK", "player_id": pid})
-                # If enough players joined, signal the coordinator thread
-                with PLAYERS_LOCK:
-                    active = [p for p in PLAYERS.values() if p["alive"]]
-                if len(active) >= PLAYERS_REQUIRED:
-                    ROUND_EVENT.set()
+                pid = await add_player(writer, addr, name)
+                await send_line(writer, {"type": "ACK", "player_id": pid})
+                async with PLAYERS_LOCK:
+                    alive = [p for p in PLAYERS.values() if p["alive"]]
+                if len(alive) >= PLAYERS_REQUIRED:
+                    ROUND_READY.set()
 
             elif mtype == "ANSWER":
                 if pid is None:
-                    send_json_line(conn, {"type": "ERROR", "message": "not_registered"})
+                    await send_line(writer, {"type": "ERROR", "message": "not_registered"})
                     continue
                 ans = str(msg.get("answer", ""))
-                handle_player_answer(pid, ans)
+                await handle_player_answer(pid, ans)
 
             elif mtype == "BYE":
                 break
 
             else:
-                send_json_line(conn, {"type": "ERROR", "message": f"unknown_type:{msg.get('type')}"})
+                await send_line(writer, {"type": "ERROR", "message": f"unknown_type:{msg.get('type')}"})
     except Exception as e:
-        # Log and drop
         print(f"[server] client error {addr}: {e}", file=sys.stderr)
     finally:
         if pid:
-            remove_player(pid)
+            await remove_player(pid)
 
 # ---------------- Game coordinator ----------------
-def coordinator() -> None:
+async def coordinator():
     # Wait for enough players
     while not STOP_EVENT.is_set():
-        with PLAYERS_LOCK:
-            active = [p for p in PLAYERS.values() if p["alive"]]
-        if len(active) >= PLAYERS_REQUIRED:
+        async with PLAYERS_LOCK:
+            alive = [p for p in PLAYERS.values() if p["alive"]]
+        if len(alive) >= PLAYERS_REQUIRED:
             break
-        ROUND_EVENT.wait(timeout=0.5)
+        try:
+            await asyncio.wait_for(ROUND_READY.wait(), timeout=0.5)
+        except asyncio.TimeoutError:
+            pass
 
     if STOP_EVENT.is_set():
         return
 
     total_rounds = len(QUESTION_TYPES)
-    start_game(total_rounds, QUESTION_SECONDS)
+    await start_game(total_rounds, QUESTION_SECONDS)
 
     for r_idx, qtype in enumerate(QUESTION_TYPES):
-        with CURRENT_ANSWERS_LOCK:
+        async with ANSWERS_LOCK:
             CURRENT_ANSWERS.clear()
 
-        # Announce round and send question
-        q = start_round(r_idx, qtype)
+        q = await start_round(r_idx, qtype)
 
-        # Wait for answers or timeout
-        receive_answers(QUESTION_SECONDS)
+        await receive_answers(QUESTION_SECONDS)
 
-        # Evaluate answers and update scores
         correct = generate_question_answer(q["question_type"], q["short_question"])
-        awards: Dict[str, int] = {}
 
-        with PLAYERS_LOCK:
-            for pid, pinfo in list(PLAYERS.items()):
-                if not pinfo["alive"]:
+        # score updates + per-player RESULT
+        async with PLAYERS_LOCK:
+            for pid, info in list(PLAYERS.items()):
+                if not info["alive"]:
                     continue
                 ans_obj = CURRENT_ANSWERS.get(pid)
                 ans = ans_obj["answer"] if ans_obj else ""
-                is_correct = (ans == correct)
-                delta = 1 if is_correct else 0
-                pinfo["score"] += delta
-                awards[pid] = delta
-                feedback = "correct" if is_correct else f"incorrect; expected '{correct}'"
+                ok = (ans == correct)
+                delta = 1 if ok else 0
+                info["score"] += delta
+                feedback = "correct" if ok else f"incorrect; expected '{correct}'"
                 try:
-                    send_json_line(pinfo["conn"], {"type": "RESULT", "correct": is_correct, "feedback": feedback, "score_delta": delta})
+                    await send_line(info["writer"],
+                                    {"type": "RESULT", "correct": ok,
+                                     "feedback": feedback, "score_delta": delta})
                 except Exception:
-                    pinfo["alive"] = False
+                    info["alive"] = False
 
-        end_round(r_idx, total_rounds, awards)
+        await end_round(r_idx, total_rounds)
         if STOP_EVENT.is_set():
             break
 
-# ---------------- Main server loop ----------------
-def main():
+# ---------------- Main ----------------
+async def main_async():
     global SERVER_CFG, PLAYERS_REQUIRED, QUESTION_SECONDS, QUESTION_TYPES
 
-    # 0. Load config and start listening
+    # Parse --config
     cfg_path = None
     if "--config" in sys.argv:
-        idx = sys.argv.index("--config")
-        cfg_path = Path(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else None
-    SERVER_CFG = load_config(cfg_path)
+        i = sys.argv.index("--config")
+        cfg_path = Path(sys.argv[i + 1]) if i + 1 < len(sys.argv) else None
+    SERVER_CFG = await load_config(cfg_path)
 
     host = SERVER_CFG.get("host", "127.0.0.1")
     port = int(SERVER_CFG.get("port", 5050))
@@ -302,45 +287,32 @@ def main():
     QUESTION_SECONDS = int(SERVER_CFG.get("question_seconds", 10))
     QUESTION_TYPES = list(SERVER_CFG.get("question_types", ["math:add", "upper"]))
 
-    def _stop(signum, _frame):
-        print(f"[server] signal {signum}, shutting down...")
-        STOP_EVENT.set()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            # Nudge any blocking accept by connecting to ourselves
-            with socket.create_connection((host, port), timeout=0.2):
-                pass
-        except Exception:
+            loop.add_signal_handler(sig, STOP_EVENT.set)
+        except NotImplementedError:
             pass
 
-    signal.signal(signal.SIGINT, _stop)
-    signal.signal(signal.SIGTERM, _stop)
+    server = await asyncio.start_server(handle_client, host, port)
+    print(f"[server] listening on {host}:{port} (players={PLAYERS_REQUIRED}, qsec={QUESTION_SECONDS})")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host, port))
-        s.listen(16)
-        print(f"[server] listening on {host}:{port} (players={PLAYERS_REQUIRED}, qsec={QUESTION_SECONDS})")
+    coord_task = asyncio.create_task(coordinator())
 
-        # Coordinator thread to run the game flow
-        coord = threading.Thread(target=coordinator, daemon=True)
-        coord.start()
+    async with server:
+        try:
+            await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
 
-        threads: List[threading.Thread] = []
-        while not STOP_EVENT.is_set():
-            try:
-                conn, addr = s.accept()
-            except OSError:
-                break
-            if STOP_EVENT.is_set():
-                conn.close()
-                break
-            t = threading.Thread(target=client_thread, args=(conn, addr), daemon=True)
-            t.start()
-            threads.append(t)
+    await coord_task
 
-        for t in threads:
-            t.join(timeout=0.5)
-        coord.join(timeout=0.5)
+def main():
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        pass
+    finally:
         print("[server] bye.")
 
 if __name__ == "__main__":

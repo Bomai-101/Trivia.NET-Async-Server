@@ -1,257 +1,237 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Client following the provided scaffold and function names.
+Async NDJSON client.
 
-Behavior:
-- Commands read from stdin (one per line):
+Local commands from stdin (one per line):
   CONNECT <host>:<port>
   DISCONNECT
   EXIT
-- When connected, the client reacts to server messages:
-  READY, QUESTION, RESULT, LEADERBOARD, FINISHED
-- Answers QUESTION using mode: "you" (prompt), "auto" (simple solver), "ai" (Ollama HTTP)
 
-Environment/config (optional JSON file):
-{
-  "host": "127.0.0.1",
-  "port": 5050,
-  "client_mode": "auto"   // "you" | "auto" | "ai"
-}
+Network protocol (over TCP, NDJSON):
+  Client -> Server: HI, ANSWER, BYE
+  Server -> Client: ACK, READY, QUESTION, RESULT, LEADERBOARD, FINISHED, ERROR
+
+Spec-aligned EXIT behavior:
+- At any point, if the player types EXIT, the client should exit and
+  send a BYE message to the server if connected (graceful shutdown).
 """
 
+import asyncio
 import json
-import requests
 import sys
-import socket
-import threading
 from pathlib import Path
-from typing import Any, Literal, Optional, Dict
+from typing import Any, Dict, Optional, Literal
 
-# --------------- Encoding/decoding ---------------
-def encode_message(message: dict[str, Any]) -> bytes:
-    return (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
+# Optional requests import for "ai" mode (not required by default)
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None
 
-def decode_message(data: bytes) -> dict[str, Any]:
+# ------------- Encoding/decoding -------------
+def _enc(obj: Dict[str, Any]) -> bytes:
+    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
+
+async def send_line(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    writer.write(_enc(obj))
+    await writer.drain()
+
+async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
+    line = await reader.readline()
+    if not line:
+        return None   # empty message -> server disconnected
     try:
-        return json.loads(data.decode("utf-8"))
+        return json.loads(line.decode("utf-8"))
     except json.JSONDecodeError:
         return {"type": "ERROR", "message": "invalid_json"}
 
-def send_message(connection: socket.socket, data: dict[str, Any]):
-    if not connection:
-        return
-    connection.sendall(encode_message(data))
+# ------------- Connection state -------------
+class Conn:
+    def __init__(self) -> None:
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
 
-def receive_message(connection: socket.socket) -> dict[str, Any]:
-    buf = b""
-    while True:
-        ch = connection.recv(1)
-        if not ch:
-            if not buf:
-                return {"type": "ERROR", "message": "disconnected"}
-            break
-        if ch == b"\n":
-            break
-        buf += ch
-    return decode_message(buf)
+    def is_connected(self) -> bool:
+        return self.reader is not None and self.writer is not None
 
-# --------------- Connection lifecycle ---------------
-ACTIVE_CONN: Optional[socket.socket] = None
-ACTIVE_LOCK = threading.Lock()
+    def clear(self) -> None:
+        self.reader = None
+        self.writer = None
+
+CONN = Conn()
 CLIENT_MODE: Literal["you", "auto", "ai"] = "auto"
-SHOULD_EXIT = threading.Event()
 
-def connect(port: int, host: str = "127.0.0.1") -> socket.socket:
-    global ACTIVE_CONN
-    conn = socket.create_connection((host, port), timeout=5)
-    with ACTIVE_LOCK:
-        ACTIVE_CONN = conn
-    # Send HI right after connection
-    send_message(conn, {"type": "HI"})
-    return conn
-
-def disconnect(connection: socket.socket):
-    try:
-        send_message(connection, {"type": "BYE"})
-    except Exception:
-        pass
-    try:
-        connection.close()
-    except Exception:
-        pass
-    with ACTIVE_LOCK:
-        if ACTIVE_CONN is connection:
-            globals()["ACTIVE_CONN"] = None
-
-# --------------- Answering logic ---------------
-def answer_question(
-    question: str,
-    short_question: str,
-    client_mode: Literal["you", "auto", "ai"]
-) -> str:
-    if client_mode == "you":
+# ------------- Answer logic -------------
+async def answer_question(question: str, short_question: str, mode: str) -> str:
+    if mode == "you":
         try:
-            return input(f"Your answer for '{short_question}': ").strip()
+            ans = await asyncio.to_thread(input, f"Your answer for '{short_question}': ")
+            return ans.strip()
         except EOFError:
             return ""
-    elif client_mode == "auto":
-        # very basic rules for demo purposes
+    if mode == "auto":
         if "+" in short_question:
             try:
-                a, b = short_question.split("+", 1)
-                return str(int(a) + int(b))
+                x, y = short_question.split("+", 1)
+                return str(int(x) + int(y))
             except Exception:
                 return ""
-        if " " in short_question:
-            return short_question.upper()
         return short_question.upper()
-    elif client_mode == "ai":
-        return answer_question_ollama(question)
+    if mode == "ai":
+        return await answer_question_ollama(question)
     return ""
 
-def answer_question_ollama(question: str) -> str:
-    """
-    Example Ollama call (adjust to your environment):
-    POST http://localhost:11434/api/generate
-    {"model":"llama3","prompt":"..."}
-    """
-    url = "http://localhost:11434/api/generate"
+async def answer_question_ollama(question: str) -> str:
+    if requests is None:
+        return ""
     try:
-        resp = requests.post(url, json={"model": "llama3", "prompt": f"Answer briefly: {question}"}, timeout=10)
+        resp = await asyncio.to_thread(
+            requests.post,
+            "http://localhost:11434/api/generate",
+            json={"model": "llama3", "prompt": f"Answer briefly: {question}"},
+            timeout=10,
+        )
         resp.raise_for_status()
-        # Ollama streaming API returns JSONL; here assume simple JSON for demo
         data = resp.json()
-        text = data.get("response", "")
-        return text.strip()
+        return data.get("response", "").strip()
     except Exception:
         return ""
 
-# --------------- Command handling ---------------
-def handle_command(command: str):
-    """
-    Supported:
-      CONNECT <host>:<port>
-      DISCONNECT
-      EXIT
-    """
-    cmd = command.strip()
-    if not cmd:
-        return
-
-    upper = cmd.upper()
-    if upper == "EXIT":
-        # Exit immediately; if connected, try to send BYE then close
-        with ACTIVE_LOCK:
-            conn = ACTIVE_CONN
-        if conn:
-            disconnect(conn)
-        SHOULD_EXIT.set()
-        return
-
-    if upper.startswith("CONNECT "):
-        parts = cmd.split(maxsplit=1)
-        if len(parts) != 2 or ":" not in parts[1]:
-            print("[client] usage: CONNECT <host>:<port>")
-            return
-        host, port_s = parts[1].split(":", 1)
-        try:
-            port = int(port_s)
-        except ValueError:
-            print("[client] invalid port")
-            return
-        try:
-            conn = connect(port=port, host=host)
-            print(f"[client] connected to {host}:{port}")
-            # Start receiver thread
-            threading.Thread(target=_receiver_loop, args=(conn,), daemon=True).start()
-        except OSError as e:
-            print(f"[client] connect failed: {e}")
-        return
-
-    if upper == "DISCONNECT":
-        with ACTIVE_LOCK:
-            conn = ACTIVE_CONN
-        if not conn:
-            print("[client] not connected")
-            return
-        disconnect(conn)
-        print("[client] disconnected")
-        return
-
-    print("[client] unknown command")
-
-# --------------- Message handling ---------------
-def handle_received_message(message: dict[str, Any]):
-    """
-    Server messages (when connected):
-      READY
-      QUESTION
-      RESULT
-      LEADERBOARD
-      FINISHED
-    """
-    mtype = str(message.get("type", "")).upper()
-    if mtype == "READY":
-        print(f"[server] READY round={message.get('round')} of {message.get('total_rounds')} qsec={message.get('question_seconds')}")
-    elif mtype == "QUESTION":
-        qtype = message.get("question_type", "")
-        q = message.get("question", "")
-        sq = message.get("short_question", "")
-        print(f"[server] QUESTION ({qtype}): {q}")
-        # Answer automatically according to CLIENT_MODE
-        with ACTIVE_LOCK:
-            conn = ACTIVE_CONN
-        if conn:
-            ans = answer_question(q, sq, CLIENT_MODE)
-            send_message(conn, {"type": "ANSWER", "answer": ans})
-    elif mtype == "RESULT":
-        print(f"[server] RESULT correct={message.get('correct')} feedback={message.get('feedback')} delta={message.get('score_delta')}")
-    elif mtype == "LEADERBOARD":
-        print(f"[server] LEADERBOARD state={message.get('state')} scores={message.get('scores')}")
-    elif mtype == "FINISHED":
-        print(f"[server] FINISHED scores={message.get('scores')}")
-    elif mtype == "ACK":
-        print(f"[server] ACK player_id={message.get('player_id')}")
-    elif mtype == "ERROR":
-        print(f"[server] ERROR {message.get('message')}")
-    else:
-        print(f"[server] <unknown> {message}")
-
-def _receiver_loop(conn: socket.socket):
+# ------------- Server message loop -------------
+async def handle_server_messages() -> None:
+    assert CONN.reader and CONN.writer
+    reader, writer = CONN.reader, CONN.writer
     try:
-        while not SHOULD_EXIT.is_set():
-            msg = receive_message(conn)
-            if msg.get("type") == "ERROR" and msg.get("message") == "disconnected":
+        while True:
+            msg = await read_line_json(reader)
+            if msg is None:
                 print("[client] server closed")
                 break
-            handle_received_message(msg)
-    except OSError:
-        pass
+            mtype = str(msg.get("type", "")).upper()
+            if mtype == "ACK":
+                print(f"[server] ACK player_id={msg.get('player_id')}")
+            elif mtype == "READY":
+                print(f"[server] READY round={msg.get('round')} of {msg.get('total_rounds')} qsec={msg.get('question_seconds')}")
+            elif mtype == "QUESTION":
+                qtype = msg.get("question_type", "")
+                q = msg.get("question", "")
+                sq = msg.get("short_question", "")
+                print(f"[server] QUESTION ({qtype}): {q}")
+                ans = await answer_question(q, sq, CLIENT_MODE)
+                await send_line(writer, {"type": "ANSWER", "answer": ans})
+            elif mtype == "RESULT":
+                print(f"[server] RESULT correct={msg.get('correct')} feedback={msg.get('feedback')} delta={msg.get('score_delta')}")
+            elif mtype == "LEADERBOARD":
+                print(f"[server] LEADERBOARD state={msg.get('state')} scores={msg.get('scores')}")
+            elif mtype == "FINISHED":
+                print(f"[server] FINISHED scores={msg.get('scores')}")
+            elif mtype == "ERROR":
+                print(f"[server] ERROR {msg.get('message')}")
+            else:
+                print(f"[server] <unknown> {msg}")
     finally:
-        with ACTIVE_LOCK:
-            if ACTIVE_CONN is conn:
-                globals()["ACTIVE_CONN"] = None
+        try:
+            if CONN.writer:
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
+        except Exception:
+            pass
+        CONN.clear()
 
-# --------------- Main ---------------
-def _load_client_config(path: Optional[Path]) -> Dict[str, Any]:
+# ------------- Local commands -------------
+async def cmd_connect(host: str, port: int) -> None:
+    if CONN.is_connected():
+        print("[client] already connected")
+        return
+    reader, writer = await asyncio.open_connection(host, port)
+    CONN.reader, CONN.writer = reader, writer
+    await send_line(writer, {"type": "HI"})
+    print(f"[client] connected to {host}:{port}")
+    asyncio.create_task(handle_server_messages())
+
+async def cmd_disconnect() -> None:
+    if not CONN.is_connected():
+        print("[client] not connected")
+        return
+    try:
+        await send_line(CONN.writer, {"type": "BYE"})  # type: ignore
+    except Exception:
+        pass
+    try:
+        CONN.writer.close()  # type: ignore
+        await CONN.writer.wait_closed()  # type: ignore
+    except Exception:
+        pass
+    CONN.clear()
+    print("[client] disconnected")
+
+async def handle_command(line: str, default_host: str, default_port: int) -> None:
+    cmd = line.strip()
+    if not cmd:
+        return
+    up = cmd.upper()
+    if up == "EXIT":
+        # Spec: on EXIT, exit and send BYE if connected
+        if CONN.is_connected():
+            try:
+                await send_line(CONN.writer, {"type": "BYE"})  # type: ignore
+            except Exception:
+                pass
+            try:
+                CONN.writer.close()  # type: ignore
+                await CONN.writer.wait_closed()  # type: ignore
+            except Exception:
+                pass
+            CONN.clear()
+            print("[client] disconnected")
+        print("[client] exiting...")
+        raise SystemExit(0)
+
+    if up == "CONNECT":
+        await cmd_connect(default_host, default_port)
+        return
+    if up.startswith("CONNECT "):
+        try:
+            _, target = cmd.split(maxsplit=1)
+            host, port_s = target.split(":", 1)
+            await cmd_connect(host, int(port_s))
+        except Exception:
+            print("[client] usage: CONNECT <host>:<port>")
+        return
+    if up == "DISCONNECT":
+        await cmd_disconnect()
+        return
+    print("[client] unknown command")
+
+# ------------- Stdin reader (async-friendly) -------------
+async def stdin_to_queue(q: asyncio.Queue[str]) -> None:
+    # Read stdin lines in a background thread to avoid blocking the event loop.
+    def _reader():
+        for raw in sys.stdin:
+            asyncio.run_coroutine_threadsafe(q.put(raw.rstrip("\r\n")), asyncio.get_event_loop())
+    await asyncio.to_thread(_reader)
+
+# ------------- Config -------------
+def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
     defaults = {"host": "127.0.0.1", "port": 5050, "client_mode": "auto"}
-    if path is None:
+    if not path:
         return defaults
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         defaults.update(data or {})
     except Exception as e:
         print(f"[client] failed to load config: {e}", file=sys.stderr)
     return defaults
 
-def main():
-    # Optional: --config <path>
-    cfg_path: Optional[Path] = None
+# ------------- Main -------------
+async def main_async():
+    # Parse --config
+    cfg_path = None
     if "--config" in sys.argv:
         i = sys.argv.index("--config")
         cfg_path = Path(sys.argv[i + 1]) if i + 1 < len(sys.argv) else None
-    cfg = _load_client_config(cfg_path)
+    cfg = load_client_config(cfg_path)
 
     global CLIENT_MODE
     CLIENT_MODE = cfg.get("client_mode", "auto")
@@ -261,34 +241,29 @@ def main():
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     print(f"[client] default CONNECT target: {default_host}:{default_port} (mode={CLIENT_MODE})")
 
-    # If stdin is piped 'EXIT', exit immediately for grader compatibility
-    if not sys.stdin.isatty():
-        data = sys.stdin.read()
-        if data.strip().upper() == "EXIT":
-            sys.exit(0)
-        # If there are other piped commands, process them then exit
-        for line in data.splitlines():
-            handle_command(line)
-        sys.exit(0)
+    q: asyncio.Queue[str] = asyncio.Queue()
+    asyncio.create_task(stdin_to_queue(q))
 
-    # Interactive loop (TTY)
-    while not SHOULD_EXIT.is_set():
-        try:
-            line = input("> ")
-        except EOFError:
-            break
-        if not line:
-            continue
-        if line.strip().upper() == "CONNECT":
-            handle_command(f"CONNECT {default_host}:{default_port}")
-        else:
-            handle_command(line)
+    # Small fast-path: if first line is EXIT, gracefully exit
+    try:
+        line = await asyncio.wait_for(q.get(), timeout=0.5)
+        await handle_command(line, default_host, default_port)
+    except asyncio.TimeoutError:
+        pass
 
-    # Ensure clean disconnect on exit if still connected
-    with ACTIVE_LOCK:
-        conn = ACTIVE_CONN
-    if conn:
-        disconnect(conn)
+    # Process subsequent commands
+    while True:
+        line = await q.get()
+        await handle_command(line, default_host, default_port)
+
+def main():
+    try:
+        asyncio.run(main_async())
+    except SystemExit:
+        # Normal graceful exit via EXIT command
+        pass
+    except KeyboardInterrupt:
+        pass
 
 if __name__ == "__main__":
     main()
