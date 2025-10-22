@@ -195,16 +195,27 @@ async def main_async():
     if not cfg_path.exists():
         print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
         sys.exit(1)
+
     cfg = load_client_config(cfg_path)
     CLIENT_MODE = cfg.get("client_mode", "auto")
     USERNAME = cfg.get("username", "player")
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
 
+    # --- FAST PATH FOR PIPED INPUT (non-TTY) ---
+    if not sys.stdin.isatty():
+        data = await asyncio.to_thread(sys.stdin.read)
+        lines = [ln.strip() for ln in data.splitlines() if ln.strip()]
+        for ln in lines:
+            if ln.upper() == "EXIT":
+                sys.exit(0)
+            await handle_command(ln, default_host, default_port)
+        sys.exit(0)
+
     print(f"[client] default target: {default_host}:{default_port} (mode={CLIENT_MODE})")
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
 
-    # stdin reader thread
+    # stdin reader thread → queue
     q: asyncio.Queue[str] = asyncio.Queue()
 
     async def stdin_reader():
@@ -227,6 +238,7 @@ async def main_async():
             line = t.result()
             await handle_command(line, default_host, default_port)
     sys.exit(0)
+
 
 def main():
     try:
