@@ -83,7 +83,7 @@ def handle_client(sock: socket.socket, addr: Tuple[str, int]) -> None:
             msg = recv_json_line(fr)
             if msg is None:
                 break
-            if msg.get("action") == "bye":
+            if msg.get("action") == "BYE":
                 send_json_line(fw, {"ok": True, "action": "bye"})
                 break
             resp = dispatch(msg)

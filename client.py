@@ -80,7 +80,7 @@ def interactive_loop(fr: IO[bytes], fw: IO[bytes], action: str) -> int:
         pass
     finally:
         try:
-            send_json_line(fw, {"action": "bye"})
+            send_json_line(fw, {"action": "BYE"})
             _ = recv_json_line(fr)
         except Exception:
             pass
@@ -93,7 +93,7 @@ def oneshot(fr: IO[bytes], fw: IO[bytes], action: str, payload: str) -> int:
     if resp:
         print(resp)
     try:
-        send_json_line(fw, {"action": "bye"})
+        send_json_line(fw, {"action": "BYE"})
         _ = recv_json_line(fr)
     except Exception:
         pass
