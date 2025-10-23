@@ -21,6 +21,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+# import questions.py exactly as required
+import questions as qmod
+
 # ---------------- Global state ----------------
 PLAYERS: Dict[str, Dict[str, Any]] = {}      # pid -> {"w": writer, "name": str, "score": int}
 CURRENT_ANSWERS: Dict[str, str] = {}         # username -> last answer
@@ -31,7 +34,7 @@ CFG: Dict[str, Any] = {}
 REQUIRED_PLAYERS: int = 2
 QUESTION_FORMATS: Dict[str, str] = {}
 
-# ---------------- Question helpers ----------------
+# ---------------- Question helpers (for scoring) ----------------
 ROMAN_MAP = {
     "M": 1000, "CM": 900, "D": 500, "CD": 400,
     "C": 100, "XC": 90, "L": 50, "XL": 40,
@@ -60,7 +63,6 @@ def parse_addition(short_q: str) -> str | None:
     except Exception:
         return None
 
-# Simplified deterministic versions (no ipaddress module)
 def usable_ipv4_addresses(cidr: str) -> str | None:
     try:
         prefix = int(cidr.split("/")[1])
@@ -73,11 +75,13 @@ def usable_ipv4_addresses(cidr: str) -> str | None:
         return None
 
 def network_and_broadcast(cidr: str) -> Tuple[str, str] | None:
-    # Instead of computing, return descriptive placeholder strings
+    # No ipaddress module allowed; provide a stable placeholder pair
     return (f"network_of_{cidr}", f"broadcast_of_{cidr}")
 
 def compute_correct_answer(question_type: str, short_question: str):
     qt = question_type.strip()
+    if not isinstance(short_question, str) or not short_question:
+        return None
     if qt == "Mathematics":
         return parse_addition(short_question)
     if qt == "Roman Numerals":
@@ -158,6 +162,23 @@ async def send_line(w: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
     w.write(enc_line(obj))
     await w.drain()
 
+# ---------------- Questions adapter (calls qmod) ----------------
+def get_short_question_for(question_type: str) -> str:
+    try:
+        if question_type == "Mathematics":
+            res = qmod.generate_mathematics_question()
+        elif question_type == "Roman Numerals":
+            res = qmod.generate_roman_numerals_question()
+        elif question_type == "Usable IP Addresses of a Subnet":
+            res = qmod.generate_usable_addresses_question()
+        elif question_type == "Network and Broadcast Address of a Subnet":
+            res = qmod.generate_network_broadcast_question()
+        else:
+            return f"[{question_type}]"
+        return str(res) if res is not None else f"[{question_type}]"
+    except Exception:
+        return f"[{question_type}]"
+
 # ---------------- Client handling ----------------
 async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
     addr = w.get_extra_info("peername")
@@ -225,21 +246,10 @@ async def coordinator() -> None:
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # Dummy generators (staff will replace questions.py)
-        try:
-            if qtype == "Mathematics":
-                short_q = str(1 + i) + " + " + str(2 + i)
-            elif qtype == "Roman Numerals":
-                short_q = "X" * i
-            elif qtype == "Usable IP Addresses of a Subnet":
-                short_q = f"192.168.0.0/{24 + (i % 4)}"
-            elif qtype == "Network and Broadcast Address of a Subnet":
-                short_q = f"10.0.{i}.0/24"
-            else:
-                short_q = f"[{qtype}]"
-        except Exception:
-            short_q = f"[{qtype}]"
+        # get short_question from questions.py via adapter
+        short_q = get_short_question_for(qtype)
 
+        # format complete question line from config formats
         fmt = QUESTION_FORMATS.get(qtype)
         question_line = fmt.format(short_q) if fmt else short_q
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
