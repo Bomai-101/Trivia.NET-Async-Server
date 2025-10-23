@@ -73,5 +73,6 @@ async def main():
     asyncio.create_task(coordinator())
     async with srv: await srv.serve_forever()
 
+#main
 if __name__=="__main__":
     asyncio.run(main())
