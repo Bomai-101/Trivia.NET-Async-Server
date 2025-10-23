@@ -5,7 +5,7 @@ import random
 
 
 def generate_mathematics_question() -> str:
-    pass
+    print("Hello")
 
     
 def generate_roman_numerals_question() -> str:
