@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Async NDJSON client (final version).
+Async NDJSON client (spec-compliant).
 
-Handles both interactive and piped stdin correctly.
-
-Spec compliance:
-- EXIT on piped input: exits immediately (used by grading test)
-- HI includes username
-- Connection failure prints 'Connection failed' and exits(1)
-- Server disconnect or FINISHED triggers clean exit
+- Start with: python client.py --config <config_path>
+- HI uses {"message_type":"HI","username":...}
+- BYE uses {"message_type":"BYE"}
+- Reads only "message_type" from server messages
+- Prints:
+  READY -> info
+  QUESTION -> trivia_question
+  RESULT -> feedback
+  LEADERBOARD -> state
+  FINISHED -> final_standings
+- Piped stdin fast path: one line; EXIT exits immediately
 """
 
 import asyncio
@@ -18,7 +23,6 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 
-# ---------------- Encoding helpers ----------------
 def _enc(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -33,17 +37,14 @@ async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any
     try:
         return json.loads(line.decode("utf-8"))
     except json.JSONDecodeError:
-        return {"type": "ERROR", "message": "invalid_json"}
+        return {"message_type": "ERROR", "message": "invalid_json"}
 
-# ---------------- Connection state ----------------
 class Conn:
     def __init__(self) -> None:
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
-
     def is_connected(self) -> bool:
         return self.reader is not None and self.writer is not None
-
     def clear(self) -> None:
         self.reader = None
         self.writer = None
@@ -53,19 +54,17 @@ CLIENT_MODE: Literal["you", "auto", "ai"] = "auto"
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
 
-# ---------------- Answer logic ----------------
 async def answer_question(question: str, short_question: str, mode: str) -> str:
     if mode == "auto":
         if "+" in short_question:
             try:
                 a, b = short_question.split("+", 1)
-                return str(int(a) + int(b))
+                return str(int(a.strip()) + int(b.strip()))
             except Exception:
                 return ""
         return short_question.upper()
     return ""
 
-# ---------------- Server message loop ----------------
 async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
@@ -75,27 +74,32 @@ async def handle_server_messages() -> None:
             if msg is None:
                 print("[client] server closed")
                 break
-            mtype = str(msg.get("type", "")).upper()
-            if mtype == "ACK":
-                print(f"[server] ACK player_id={msg.get('player_id')}")
-            elif mtype == "READY":
-                print(f"[server] READY round={msg.get('round')} of {msg.get('total_rounds')} qsec={msg.get('question_seconds')}")
+            mtype = str(msg.get("message_type", "")).upper()
+
+            if mtype == "READY":
+                info = msg.get("info", "")
+                print(info)
+
             elif mtype == "QUESTION":
-                qtype = msg.get("question_type", "")
-                q = msg.get("question", "")
-                sq = msg.get("short_question", "")
-                print(f"[server] QUESTION ({qtype}): {q}")
-                ans = await answer_question(q, sq, CLIENT_MODE)
-                await send_line(writer, {"type": "ANSWER", "answer": ans})
+                trivia = msg.get("trivia_question", "")
+                short_q = msg.get("short_question", "")
+                print(trivia)
+                ans = await answer_question(trivia, short_q, CLIENT_MODE)
+                await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+
             elif mtype == "RESULT":
-                print(f"[server] RESULT correct={msg.get('correct')} feedback={msg.get('feedback')} delta={msg.get('score_delta')}")
+                print(msg.get("feedback", ""))
+
             elif mtype == "LEADERBOARD":
-                print(f"[server] LEADERBOARD state={msg.get('state')} scores={msg.get('scores')}")
+                print(msg.get("state", ""))
+
             elif mtype == "FINISHED":
-                print(f"[server] FINISHED scores={msg.get('scores')}")
+                print(msg.get("final_standings", ""))
                 break
+
             elif mtype == "ERROR":
                 print(f"[server] ERROR {msg.get('message')}")
+
             else:
                 print(f"[server] <unknown> {msg}")
     finally:
@@ -106,9 +110,8 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        EXIT_EVENT.set()  # triggers main exit
+        EXIT_EVENT.set()
 
-# ---------------- Commands ----------------
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
         print("[client] already connected")
@@ -119,7 +122,7 @@ async def cmd_connect(host: str, port: int) -> None:
         print("Connection failed")
         raise SystemExit(1)
     CONN.reader, CONN.writer = reader, writer
-    await send_line(writer, {"type": "HI", "username": USERNAME})
+    await send_line(writer, {"message_type": "HI", "username": USERNAME})
     print(f"[client] connected to {host}:{port}")
     asyncio.create_task(handle_server_messages())
 
@@ -128,7 +131,7 @@ async def cmd_disconnect() -> None:
         print("[client] not connected")
         return
     try:
-        await send_line(CONN.writer, {"type": "BYE"})  # type: ignore
+        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
     except Exception:
         pass
     try:
@@ -165,7 +168,6 @@ async def handle_command(line: str, default_host: str, default_port: int) -> Non
         return
     print("[client] unknown command")
 
-# ---------------- Config ----------------
 def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
     defaults = {"host": "127.0.0.1", "port": 5050, "client_mode": "auto", "username": "player"}
     if not path:
@@ -177,22 +179,17 @@ def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
         print(f"[client] failed to load config: {e}", file=sys.stderr)
     return defaults
 
-# ---------------- Main ----------------
 async def main_async():
     global CLIENT_MODE, USERNAME
     args = sys.argv[1:]
-    if not args:
+    if not args or args[0] != "--config":
         print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
-    if args[0] == "--config":
-        if len(args) < 2:
-            print("client.py: Configuration not provided", file=sys.stderr)
-            sys.exit(1)
-        cfg_path = Path(args[1])
-    else:
-        print(f"client.py: Configuration not provided", file=sys.stderr)
+    if len(args) < 2:
+        print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
+    cfg_path = Path(args[1])
     if not cfg_path.exists():
         print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
         sys.exit(1)
@@ -203,9 +200,7 @@ async def main_async():
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
 
-    # --- FAST PATH FOR PIPED INPUT (non-TTY) ---
     if not sys.stdin.isatty():
-        # Read only one line (test harness writes EXIT\n but does not close stdin)
         line = await asyncio.to_thread(sys.stdin.readline)
         line = (line or "").strip()
         if not line:
