@@ -14,7 +14,7 @@ LOCK = asyncio.Lock()
 READY = asyncio.Event()
 
 async def send_line(w, obj): 
-    w.write((json.dumps(obj, ensure_ascii=False)+"\n").encode()); await w.drain()
+    w.write((json.dumps(obj, ensure_ascii=False)+"\n").encode("utf-8")); await w.drain()
 
 async def handle_client(r, w):
     addr = w.get_extra_info("peername")
@@ -23,14 +23,14 @@ async def handle_client(r, w):
         while True:
             line = await r.readline()
             if not line: break
-            msg = json.loads(line.decode())
+            msg = json.loads(line.decode("utf-8"))
             t = msg.get("type","").upper()
             if t=="HI":
                 async with LOCK: PLAYERS[pid]={"w":w,"name":msg.get("username",pid),"score":0}
                 await send_line(w,{"type":"ACK","player_id":pid})
                 if len(PLAYERS)>=2: READY.set()
             elif t=="ANSWER":
-                async with LOCK: CURRENT_ANSWERS[pid]=msg.get("answer","")
+                async with LOCK: CURRENT_ANSWERS[PLAYERS[pid]["name"]]=msg.get("answer","")
             elif t=="BYE": break
     except: pass
     finally:

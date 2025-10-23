@@ -190,7 +190,9 @@ async def main_async():
             sys.exit(1)
         cfg_path = Path(args[1])
     else:
-        cfg_path = Path(args[0])
+        print(f"client.py: Configuration not provided", file=sys.stderr)
+        sys.exit(1)
+
     if not cfg_path.exists():
         print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
         sys.exit(1)
