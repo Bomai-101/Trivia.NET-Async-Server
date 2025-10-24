@@ -246,10 +246,10 @@ async def coordinator() -> None:
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # get short_question from questions.py via adapter
+        # get short_question from questions.py  via adapter
         short_q = get_short_question_for(qtype)
 
-        # format complete question line from config formats
+        # format complete question line from config  formats
         fmt = QUESTION_FORMATS.get(qtype)
         question_line = fmt.format(short_q) if fmt else short_q
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"

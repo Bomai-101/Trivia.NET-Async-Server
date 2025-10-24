@@ -217,6 +217,7 @@ async def handle_server_messages() -> None:
                 print(f"[server] ERROR {msg.get('message')}")
 
             else:
+                # debug: server sent something we didn't recognise
                 print(f"[server] <unknown> {msg}")
     finally:
         try:
