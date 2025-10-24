@@ -324,16 +324,6 @@ async def main_async():
         await EXIT_EVENT.wait()  
         sys.exit(0)
 
-    if not sys.stdin.isatty():
-        line = await asyncio.to_thread(sys.stdin.readline)
-        line = (line or "").strip()
-        if not line:
-            sys.exit(0)
-        if line.upper() == "EXIT":
-            sys.exit(0)
-        await handle_command(line, default_host, default_port)
-        sys.exit(0)
-
     print(f"[client] default target: {default_host}:{default_port} (mode={CLIENT_MODE})")
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
 
