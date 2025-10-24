@@ -243,7 +243,7 @@ async def cmd_connect(host: str, port: int) -> None:
         print("Connection failed")
         raise SystemExit(1)
     CONN.reader, CONN.writer = reader, writer
-    await send_line(writer, {"message_type": "HI", "username": USERNAME})
+    await send_line(writer, {"message_type": "HI","type": "HI", "username": USERNAME})
     print(f"[client] connected to {host}:{port}")
     asyncio.create_task(handle_server_messages())
 
