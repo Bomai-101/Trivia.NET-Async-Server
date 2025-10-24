@@ -246,7 +246,6 @@ async def cmd_connect(host: str, port: int) -> None:
     print(f"[client] connected to {host}:{port}")
     hi_msg = {
         "message_type": "HI",
-        "type": "HI",
         "username": USERNAME
     }
     print(f"[debug] sending HI: {hi_msg}")
