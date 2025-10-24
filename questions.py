@@ -5,9 +5,23 @@ import random
 
 def generate_mathematics_question() -> str:
     # e.g., "3 + 4"
-    a = random.randint(0, 9)
-    b = random.randint(0, 9)
-    return f"{a} + {b}"
+    no_of_operator =  random.randint(1,4)
+    start_number =  random.randint(0, 100)
+    result_string = "" + str(start_number)
+    temp_string = ''
+    while no_of_operator > 0:
+        no_of_operator -= 1
+        temp_number =  random.randint(0, 100)
+        choose_operator = random.randint(0, 1)
+        operator = ''
+        if (choose_operator == 1):
+            operator = '+'
+        else:
+            operator = '-'
+        temp_string += operator
+        temp_string += str(temp_number)
+        result_string += temp_string
+    return result_string
 
 def generate_roman_numerals_question() -> str:
     # Return a Roman numeral string (e.g., "XIV")
@@ -25,7 +39,7 @@ def generate_network_broadcast_question() -> str:
     # Return a valid IPv4 CIDR for network/broadcast question
     third_octet = random.randint(0, 254)
     return f"10.0.{third_octet}.0/24"
-
+  
 # ---- helpers ----
 def _int_to_roman(num: int) -> str:
     vals = [
