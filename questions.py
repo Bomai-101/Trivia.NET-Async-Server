@@ -4,24 +4,14 @@
 import random
 
 def generate_mathematics_question() -> str:
-    # e.g., "3 + 4"
-    no_of_operator =  random.randint(1,4)
-    start_number =  random.randint(0, 100)
-    result_string = "" + str(start_number)
-    temp_string = ''
-    while no_of_operator > 0:
-        no_of_operator -= 1
-        temp_number =  random.randint(0, 100)
-        choose_operator = random.randint(0, 1)
-        operator = ''
-        if (choose_operator == 1):
-            operator = '+'
-        else:
-            operator = '-'
-        temp_string += operator
-        temp_string += str(temp_number)
-        result_string += temp_string
-    return result_string
+    # Build: "<n> <op> <n> [<op> <n>]..." with 1–4 operators, numbers 0–199
+    op_count = random.randint(1, 4)
+    s = str(random.randint(0, 100))  # first number
+    for _ in range(op_count):
+        op = random.choice(['+', '-'])
+        n = random.randint(0, 100)
+        s += f" {op} {n}"
+    return s
 
 def generate_roman_numerals_question() -> str:
     # Return a Roman numeral string (e.g., "XIV")
