@@ -98,7 +98,7 @@ def format_feedback(template: str, answer: str, correct_answer: str) -> str:
     except Exception:
         return template
 
-# ---------------- Leaderboard / standings ----------------
+# ---------------- Leaderboard / standings ---------------
 def pluralize_points(n: int) -> str:
     singular = CFG.get("points_noun_singular", "point")
     plural = CFG.get("points_noun_plural", "points")
