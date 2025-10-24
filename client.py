@@ -341,7 +341,7 @@ async def main_async():
 
     print(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # auto mode: immediately connect and then just wait for server msgs
+    # auto mode: immediately connect and then  just wait for server msgs
     if CLIENT_MODE == "auto":
         await cmd_connect(default_host, default_port)
         print("[debug] waiting for server messages in auto mode")
