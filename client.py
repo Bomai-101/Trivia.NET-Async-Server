@@ -191,8 +191,6 @@ async def handle_server_messages() -> None:
                 break
 
             raw_type = msg.get("message_type")
-            if raw_type is None:
-                raw_type = msg.get("type")
             mtype = str(raw_type or "").upper()
 
             if mtype == "READY":
@@ -243,7 +241,7 @@ async def cmd_connect(host: str, port: int) -> None:
         print("Connection failed")
         raise SystemExit(1)
     CONN.reader, CONN.writer = reader, writer
-    await send_line(writer, {"message_type": "HI","type": "HI", "username": USERNAME})
+    await send_line(writer, {"message_type": "HI", "username": USERNAME})
     print(f"[client] connected to {host}:{port}")
     asyncio.create_task(handle_server_messages())
 
