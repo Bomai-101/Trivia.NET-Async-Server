@@ -75,7 +75,7 @@ def usable_ipv4_addresses(cidr: str) -> str | None:
         return None
 
 def network_and_broadcast(cidr: str) -> Tuple[str, str] | None:
-    # No ipaddress module allowed; provide a stable placeholder pair
+    # No ipaddress module  allowed; provide a stable placeholder pair
     return (f"network_of_{cidr}", f"broadcast_of_{cidr}")
 
 def compute_correct_answer(question_type: str, short_question: str):
