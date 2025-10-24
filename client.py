@@ -319,6 +319,11 @@ async def main_async():
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
 
+    if CLIENT_MODE == "auto":
+        await cmd_connect(default_host, default_port)
+        await EXIT_EVENT.wait()  
+        sys.exit(0)
+
     if not sys.stdin.isatty():
         line = await asyncio.to_thread(sys.stdin.readline)
         line = (line or "").strip()
