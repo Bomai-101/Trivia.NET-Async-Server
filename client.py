@@ -167,7 +167,7 @@ def _network_broadcast_pair(cidr: str) -> str:
     bcast_ip = _int_to_ip(broadcast_int)
     return f"{net_ip} and {bcast_ip}"
 
-# --------------------------------------------------
+# ---------------------------------------------------
 async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
