@@ -252,7 +252,7 @@ async def cmd_disconnect() -> None:
         pass
     try:
         CONN.writer.close()  # type: ignore
-        await CONN.writer.wait_closed()  # type: ignore
+        await CONN.writer.wait_closed()  # type:  ignore 
     except Exception:
         pass
     CONN.clear()
