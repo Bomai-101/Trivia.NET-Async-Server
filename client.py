@@ -189,7 +189,11 @@ async def handle_server_messages() -> None:
             if msg is None:
                 print("[client] server closed")
                 break
-            mtype = str(msg.get("message_type", "")).upper()
+            
+            raw_type = msg.get("message_type")
+            if raw_type is None:
+                raw_type = msg.get("type")
+            mtype = str(raw_type or "").upper()
 
             if mtype == "READY":
                 info = msg.get("info", "")
