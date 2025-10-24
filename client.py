@@ -189,7 +189,7 @@ async def handle_server_messages() -> None:
             if msg is None:
                 print("[client] server closed")
                 break
-            
+
             raw_type = msg.get("message_type")
             if raw_type is None:
                 raw_type = msg.get("type")
@@ -221,7 +221,7 @@ async def handle_server_messages() -> None:
                 print(f"[server] ERROR {msg.get('message')}")
 
             else:
-                # debug: server sent something we didn't recognise
+                # debug:  server sent something we didn't recognise
                 print(f"[server] <unknown> {msg}")
     finally:
         try:
