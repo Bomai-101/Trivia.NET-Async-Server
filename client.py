@@ -54,17 +54,132 @@ CLIENT_MODE: Literal["you", "auto", "ai"] = "auto"
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
 
-async def answer_question(question: str, short_question: str, mode: str) -> str:
-    if mode == "auto":
-        if "+" in short_question:
-            try:
-                a, b = short_question.split("+", 1)
-                return str(int(a.strip()) + int(b.strip()))
-            except Exception:
-                return ""
-        return short_question.upper()
+def answer_question_auto(question_type: str, short_question: str, mode: str) -> str:
+    if mode != "auto":
+        return ""
+
+    qtype = question_type.strip()
+
+    if qtype == "Mathematics":
+        return _eval_plus_minus(short_question)
+
+    if qtype == "Roman Numerals":
+        return str(_roman_to_int(short_question))
+
+    if qtype == "Usable IP Addresses of a Subnet":
+        # should be just the number of usable hosts
+        return _usable_ipv4_addresses(short_question)
+
+    if qtype == "Network and Broadcast Address of a Subnet":
+        # must answer "NETWORK and BROADCAST"
+        return _network_broadcast_pair(short_question)
+
+    # fallback
     return ""
 
+
+# --- helpers for auto mode ---
+
+def _roman_to_int(s: str) -> int:
+    ROMAN_MAP = {
+        "M": 1000, "CM": 900, "D": 500, "CD": 400,
+        "C": 100, "XC": 90, "L": 50, "XL": 40,
+        "X": 10, "IX": 9, "V": 5, "IV": 4, "I": 1
+    }
+    i = 0
+    n = 0
+    s = s.strip().upper()
+    while i < len(s):
+        if i + 1 < len(s) and s[i:i+2] in ROMAN_MAP:
+            n += ROMAN_MAP[s[i:i+2]]
+            i += 2
+        else:
+            n += ROMAN_MAP[s[i]]
+            i += 1
+    return n
+
+def _eval_plus_minus(expr: str) -> str:
+    # expr like "12 + 3 - 4 + 5"
+    tokens = expr.split()
+    if not tokens:
+        return ""
+    try:
+        total = int(tokens[0])
+    except Exception:
+        return ""
+    i = 1
+    while i < len(tokens) - 1:
+        op = tokens[i]
+        try:
+            val = int(tokens[i+1])
+        except Exception:
+            return ""
+        if op == "+":
+            total += val
+        elif op == "-":
+            total -= val
+        else:
+            return ""
+        i += 2
+    return str(total)
+
+def _usable_ipv4_addresses(cidr: str) -> str:
+    # "A.B.C.D/prefix"
+    try:
+        prefix = int(cidr.split("/")[1])
+    except Exception:
+        return ""
+    if prefix >= 31:
+        return "0"
+    host_bits = 32 - prefix
+    usable = (1 << host_bits) - 2
+    return str(usable)
+
+def _ip_to_int(a, b, c, d):
+    return ((a << 24) |
+            (b << 16) |
+            (c << 8)  |
+            d)
+
+def _int_to_ip(n: int) -> str:
+    a = (n >> 24) & 255
+    b = (n >> 16) & 255
+    c = (n >> 8) & 255
+    d = n & 255
+    return f"{a}.{b}.{c}.{d}"
+
+def _network_broadcast_pair(cidr: str) -> str:
+    # return "NETWORK and BROADCAST"
+    # so we can send exactly that as the ANSWER string
+    try:
+        addr_str, prefix_str = cidr.split("/")
+        prefix = int(prefix_str)
+        octets = addr_str.split(".")
+        if len(octets) != 4:
+            return ""
+        a, b, c, d = [int(x) for x in octets]
+    except Exception:
+        return ""
+    if prefix < 0 or prefix > 32:
+        return ""
+
+    # convert IP to 32-bit int
+    ip_int = _ip_to_int(a, b, c, d)
+
+    # build mask: first prefix bits are 1s, rest 0s
+    if prefix == 0:
+        mask = 0
+    else:
+        mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF)
+
+    network_int = ip_int & mask
+    broadcast_int = network_int | (~mask & 0xFFFFFFFF)
+
+    net_ip = _int_to_ip(network_int)
+    bcast_ip = _int_to_ip(broadcast_int)
+    return f"{net_ip} and {bcast_ip}"
+
+#-----------------------------------------------------------------
 async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
@@ -83,8 +198,9 @@ async def handle_server_messages() -> None:
             elif mtype == "QUESTION":
                 trivia = msg.get("trivia_question", "")
                 short_q = msg.get("short_question", "")
+                qtype = msg.get("question_type", "")
                 print(trivia)
-                ans = await answer_question(trivia, short_q, CLIENT_MODE)
+                ans = answer_question_auto(qtype, short_q, CLIENT_MODE)
                 await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
             elif mtype == "RESULT":
