@@ -302,7 +302,7 @@ async def coordinator() -> None:
     final_text = build_final_standings()
     await broadcast({"message_type": "FINISHED", "final_standings": final_text})
 
-# ---------------- Config / main ----------------
+# ---------------- Config / main -----------------
 def load_server_config(path: Path) -> Dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
