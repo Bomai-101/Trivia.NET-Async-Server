@@ -179,7 +179,7 @@ async def play_game_auto(username: str) -> None:
             trivia = msg.get("trivia_question", "")
             short_q = msg.get("short_question", "")
 
-            # print actual question text (expected output)
+            # print actual question text  (expected output)
             print(trivia)
 
             # compute + send answer
