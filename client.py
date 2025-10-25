@@ -243,10 +243,18 @@ async def handle_server_messages() -> None:
                     # mode "you": do NOT auto-answer in spec,
                     # but we still send something ("test_answer") so the game can proceed
                     # in auto grading. We keep this silent (dprint only).
-                    dprint(f"[debug] answering with: {"test_ans"}")
+                    try:
+                        dprint("[debug] waiting for user input...")
+                        ans = await asyncio.to_thread(sys.stdin.readline)
+                        ans = (ans or "").strip()
+                    except Exception:
+                        ans = ""
+                    if not ans:
+                        ans = "test_answer"  
+                    dprint(f"[debug] sending user answer: {ans}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
-                        "answer": "test_answer"
+                        "answer": ans
                     })
 
             elif mtype == "RESULT":
