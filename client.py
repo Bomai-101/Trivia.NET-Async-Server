@@ -305,7 +305,7 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, hi_msg)
     dprint("[debug] HI sent")
 
-    # begin reading server messages in background
+    # begin reading server messages in background 
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
