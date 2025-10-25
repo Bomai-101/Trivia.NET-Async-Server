@@ -21,12 +21,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-# import questions.py exactly as required
 import questions as qmod
 
 # ---------------- Global state ----------------
 PLAYERS: Dict[str, Dict[str, Any]] = {}      # pid -> {"w": writer, "name": str, "score": int}
-CURRENT_ANSWERS: Dict[str, str] = {}         # username -> last answer
+CURRENT_ANSWERS: Dict[str, str] = {}         # username -> last answer (this round)
+SEEN_USERS: set[str] = set()                 # usernames that have ever sent HI
+
 LOCK = asyncio.Lock()
 READY = asyncio.Event()
 
@@ -35,15 +36,13 @@ REQUIRED_PLAYERS: int = 2
 QUESTION_FORMATS: Dict[str, str] = {}
 
 # -------------------------------------------------------------------
-# Answer-evaluation helpers (mirrored from the client's auto solver)
+# Answer-evaluation helpers (mirrors client auto-answer logic)
 # -------------------------------------------------------------------
 
 def _eval_plus_minus(expr: str) -> str | None:
     """
-    Safely evaluate expressions like:
-    "12 + 3 - 4 + 5"
-    Returns the integer result as string, or None on failure.
-    Supports only + and - with spaces.
+    Evaluate simple + / - expressions with spaces, e.g. "12 + 3 - 4 + 5".
+    Return result as string, or None on failure.
     """
     tokens = expr.split()
     if not tokens:
@@ -70,8 +69,7 @@ def _eval_plus_minus(expr: str) -> str | None:
 
 def _roman_to_int(s: str) -> int:
     """
-    Convert a Roman numeral string like 'XLV' to an integer (45).
-    Supports subtractive pairs (IV, IX, etc.).
+    Convert a Roman numeral (supports subtractives) to integer.
     """
     ROMAN_MAP = {
         "M": 1000, "CM": 900, "D": 500, "CD": 400,
@@ -92,8 +90,9 @@ def _roman_to_int(s: str) -> int:
 
 def _usable_ipv4_addresses(cidr: str) -> str | None:
     """
-    Given e.g. '192.168.1.0/24', return number of usable hosts in that subnet.
-    Formula for normal subnets: (2^(32-prefix) - 2), except /31 and /32 → 0 usable.
+    "a.b.c.d/prefix" -> usable IPv4 host count.
+    For /31 and /32 we return "0".
+    Formula: (2^(32-prefix) - 2)
     """
     try:
         prefix = int(cidr.split("/")[1])
@@ -106,18 +105,12 @@ def _usable_ipv4_addresses(cidr: str) -> str | None:
     return str(usable)
 
 def _ip_to_int(a: int, b: int, c: int, d: int) -> int:
-    """
-    Pack 4 octets into a 32-bit integer.
-    """
     return ((a << 24) |
             (b << 16) |
             (c << 8)  |
             d)
 
 def _int_to_ip(n: int) -> str:
-    """
-    Convert 32-bit integer back to dotted IPv4 string.
-    """
     a = (n >> 24) & 255
     b = (n >> 16) & 255
     c = (n >> 8) & 255
@@ -126,8 +119,7 @@ def _int_to_ip(n: int) -> str:
 
 def _network_and_broadcast_pair(cidr: str) -> Tuple[str, str] | None:
     """
-    Return (network_ip, broadcast_ip) for a CIDR like '192.168.1.37/24'.
-    This mirrors the logic the client uses to answer the 'Network and Broadcast' question.
+    Return (network_ip, broadcast_ip) for CIDR like "192.168.1.37/24".
     """
     try:
         addr_str, prefix_str = cidr.split("/")
@@ -142,10 +134,8 @@ def _network_and_broadcast_pair(cidr: str) -> Tuple[str, str] | None:
     if prefix < 0 or prefix > 32:
         return None
 
-    # convert IP to 32-bit int
     ip_int = _ip_to_int(a, b, c, d)
 
-    # build mask: first prefix bits are 1s, the rest 0s
     if prefix == 0:
         mask = 0
     else:
@@ -158,43 +148,40 @@ def _network_and_broadcast_pair(cidr: str) -> Tuple[str, str] | None:
     bcast_ip = _int_to_ip(broadcast_int)
     return (net_ip, bcast_ip)
 
-def compute_correct_answer(question_type: str, short_question: str):
+def compute_correct_answer(question_type: str, short_question: str) -> str | None:
     """
-    Given the question_type (e.g. 'Mathematics') and the short_question
-    (e.g. '12 + 3 - 4'), produce the canonical correct answer in the same
-    format the client would send back in auto mode.
+    Map question_type + short_question -> canonical correct answer string.
+    Must match what the auto client would send.
     """
     qt = question_type.strip()
     if not isinstance(short_question, str) or not short_question:
         return None
 
     if qt == "Mathematics":
-        # e.g. "12 + 3 - 4 + 5" -> "16"
+        # "63 - 41 + 19 - 41 + 39" -> "39"
         return _eval_plus_minus(short_question)
 
     if qt == "Roman Numerals":
-        # e.g. "XLV" -> "45"
+        # "MCCCXLVIII" -> "1348"
         return str(_roman_to_int(short_question))
 
     if qt == "Usable IP Addresses of a Subnet":
-        # e.g. "192.168.1.0/24" -> "254"
+        # "192.168.1.0/24" -> "254"
         return _usable_ipv4_addresses(short_question)
 
     if qt == "Network and Broadcast Address of a Subnet":
-        # e.g. "192.168.1.37/24" -> ("192.168.1.0", "192.168.1.255")
+        # "192.168.1.37/24" -> "192.168.1.0 and 192.168.1.255"
         pair = _network_and_broadcast_pair(short_question)
         if pair is None:
             return None
         net_ip, bcast_ip = pair
-        # The client responds as "NETWORK and BROADCAST"
-        # so for correctness comparison, we return exactly that string.
         return f"{net_ip} and {bcast_ip}"
 
     return None
 
 def format_feedback(template: str, answer: str, correct_answer: str) -> str:
     """
-    Fill {answer} and {correct_answer} placeholders if they appear in the template.
+    Fill {answer} and {correct_answer} fields in template safely.
     """
     try:
         return template.format(answer=answer, correct_answer=correct_answer)
@@ -211,12 +198,20 @@ def pluralize_points(n: int) -> str:
     return singular if n == 1 else plural
 
 def sorted_players() -> List[Tuple[str, int]]:
+    """
+    Return list of (name, score), sorted by score desc then name asc.
+    Uses only *currently connected* PLAYERS.
+    """
     items = [(p["name"], p["score"]) for p in PLAYERS.values()]
-    # Sort: score desc, then name asc
     items.sort(key=lambda t: (-t[1], t[0]))
     return items
 
 def build_leaderboard_state() -> str:
+    """
+    Build string:
+    "1. Alice: 2 points\n1. Bob: 2 points\n3. Carol: 1 point"
+    Tie -> same rank number.
+    """
     items = sorted_players()
     lines: List[str] = []
     rank = 0
@@ -231,6 +226,9 @@ def build_leaderboard_state() -> str:
     return "\n".join(lines)
 
 def build_final_standings() -> str:
+    """
+    Multiline final standings including winner line.
+    """
     heading = CFG.get("final_standings_heading", "Final standings:")
     one_winner_tpl = CFG.get("one_winner", "{} is the sole victor!")
     multiple_winners_tpl = CFG.get("multiple_winners", "Say congratulations to {}!")
@@ -276,13 +274,13 @@ async def send_line(w: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
     await w.drain()
 
 # -------------------------------------------------------------------
-# Questions adapter (calls qmod from questions.py)
+# Question generator adapter (calls questions.py)
 # -------------------------------------------------------------------
 
 def get_short_question_for(question_type: str) -> str:
     """
-    Ask questions.py (qmod) to generate the short form of the question.
-    We do NOT generate here; this is required by the assignment spec.
+    Use questions.py to generate the short question string.
+    We do NOT invent our own question text.
     """
     try:
         if question_type == "Mathematics":
@@ -304,6 +302,13 @@ def get_short_question_for(question_type: str) -> str:
 # -------------------------------------------------------------------
 
 async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
+    """
+    Each TCP client stays in here.
+    We:
+      - record them on HI
+      - store answers on ANSWER
+      - keep connection open
+    """
     addr = w.get_extra_info("peername")
     pid = f"{addr[0]}:{addr[1]}" if addr else "unknown"
 
@@ -311,7 +316,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
         while True:
             line = await r.readline()
             if not line:
-                break
+                break  # disconnect
             try:
                 msg = json.loads(line.decode("utf-8"))
             except json.JSONDecodeError:
@@ -322,8 +327,12 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
             if mtype == "HI":
                 username = msg.get("username", pid)
                 async with LOCK:
+                    # mark this username as "seen", even if they disconnect later
+                    SEEN_USERS.add(username)
+                    # keep active writer
                     PLAYERS[pid] = {"w": w, "name": username, "score": 0}
-                    if len(PLAYERS) >= REQUIRED_PLAYERS:
+                    # once we've SEEN enough users at any time, start game
+                    if len(SEEN_USERS) >= REQUIRED_PLAYERS:
                         READY.set()
 
             elif mtype == "ANSWER":
@@ -345,7 +354,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
         except Exception:
             pass
 
-# broadcast helper
+# broadcast helper for all *currently connected* players
 async def broadcast(msg: Dict[str, Any]) -> None:
     async with LOCK:
         targets = list(PLAYERS.values())
@@ -360,7 +369,7 @@ async def broadcast(msg: Dict[str, Any]) -> None:
 # -------------------------------------------------------------------
 
 async def coordinator() -> None:
-    # wait until enough players have joined
+    # Wait until we've seen enough HI's total (not necessarily still connected)
     await READY.wait()
 
     qtypes = CFG.get("question_types", []) or []
@@ -374,21 +383,22 @@ async def coordinator() -> None:
     except Exception:
         ready_info = ready_info_tpl
 
-    # tell players: game starting
+    # Tell players game is starting
     await broadcast({
         "message_type": "READY",
         "info": ready_info
     })
 
+    # Ask each question in order
     for i, qtype in enumerate(qtypes, start=1):
-        # clear collected answers for this round
+        # clear answers for this round
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # generate question body from questions.py
+        # get short form question from questions.py
         short_q = get_short_question_for(qtype)
 
-        # build human-readable line using config format
+        # build the pretty trivia_question text using config's question_formats
         fmt = QUESTION_FORMATS.get(qtype)
         if fmt:
             try:
@@ -398,11 +408,10 @@ async def coordinator() -> None:
         else:
             question_line = short_q
 
-        # e.g. "Question 1 (Mathematics):\nEvaluate 12 + 3 - 4 + 5"
-        # note: spec example uses "Question 1 (Type)\n...", colon is optional
+        # e.g. "Question 1 (Mathematics):\n63 - 41 + 19 - 41 + 39"
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
 
-        # send QUESTION to all players
+        # send QUESTION
         await broadcast({
             "message_type": "QUESTION",
             "question_type": qtype,
@@ -411,13 +420,14 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
 
-        # wait question_seconds so clients can reply
+        # wait for answers
+        # IMPORTANT: add a grace buffer so we don't miss slightly-late ANSWER
         try:
-            await asyncio.sleep(float(qsec))
+            await asyncio.sleep(float(qsec) + 0.3)
         except Exception:
             await asyncio.sleep(0)
 
-        # build responses and scoring
+        # Now score and reply RESULT per-player
         ok_tpl = CFG.get(
             "correct_answer",
             "{answer} is correct!"
@@ -428,10 +438,6 @@ async def coordinator() -> None:
         )
 
         correct_full = compute_correct_answer(qtype, short_q)
-        # correct_full is either:
-        #   - "42" (Mathematics, Roman, usable addresses)
-        #   - "192.168.1.0 and 192.168.1.255" (network/broadcast)
-        #   - None (if something failed)
 
         async with LOCK:
             players_snapshot = list(PLAYERS.values())
@@ -447,7 +453,7 @@ async def coordinator() -> None:
                 correct_str = correct_full
                 ok = (ans == correct_full)
 
-            # award point if correct
+            # update score if correct
             if ok:
                 p["score"] += 1
 
@@ -458,28 +464,28 @@ async def coordinator() -> None:
                 correct_str
             )
 
-            # send RESULT to this single player
+            # send RESULT directly to that player
             await send_line(p["w"], {
                 "message_type": "RESULT",
                 "correct": bool(ok),
                 "feedback": feedback
             })
 
-        # broadcast updated leaderboard
+        # send LEADERBOARD to everyone
         state = build_leaderboard_state()
         await broadcast({
             "message_type": "LEADERBOARD",
             "state": state
         })
 
-        # wait between questions if configured
+        # pause between questions if configured
         if i < len(qtypes) and qgap:
             try:
                 await asyncio.sleep(float(qgap))
             except Exception:
                 await asyncio.sleep(0)
 
-    # game finished: broadcast final standings
+    # After last question: send FINISHED with final standings
     final_text = build_final_standings()
     await broadcast({
         "message_type": "FINISHED",
@@ -498,10 +504,8 @@ def load_server_config(path: Path) -> Dict[str, Any]:
 
 async def main() -> None:
     args = sys.argv[1:]
-    if not args or args[0] != "--config":
-        print("server.py: Configuration not provided", file=sys.stderr)
-        sys.exit(1)
-    if len(args) < 2:
+    # require: python server.py --config <path>
+    if not args or args[0] != "--config" or len(args) < 2:
         print("server.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
@@ -523,8 +527,11 @@ async def main() -> None:
         sys.exit(1)
 
     print(f"[server] listening on 127.0.0.1:{port}")
+
+    # Start the coordinator in the background
     asyncio.create_task(coordinator())
 
+    # Run the server forever
     async with srv:
         await srv.serve_forever()
 
