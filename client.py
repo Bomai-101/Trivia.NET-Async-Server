@@ -264,15 +264,12 @@ async def disconnect() -> None:
 # -------------------- config + main --------------------
 
 def load_config(path: Path) -> Dict[str, Any]:
-    # 根据你的要求：不做任何默认值/兜底
     text = path.read_text(encoding="utf-8")
     return json.loads(text)
 
 async def main_async():
-    # 要求：必须用 --config <path>
     args = sys.argv[1:]
     if len(args) != 2 or args[0] != "--config":
-        # 不给额外 fallback，直接退出
         sys.exit(1)
 
     cfg_path = Path(args[1])
@@ -283,20 +280,15 @@ async def main_async():
     host: str = cfg.get("host")
     port: int = cfg.get("port")
 
-    # 三种模式处理
 
     if mode in ("auto","ai"):
-        # 立即连
         await connect_and_hi(host, port, username)
-        # 自动游戏流程
         await play_game_auto(username)
         await disconnect()
         return
 
     # mode == "you"
-    # 这里不抢跑。我们先读取一行 stdin，格式应该是:
     # CONNECT <host>:<port>
-    # 然后连那个 host/port，而不是 config 里的 host/port
     first_line = await asyncio.to_thread(sys.stdin.readline)
     first_line = first_line.strip()
 
@@ -307,8 +299,7 @@ async def main_async():
         await play_game_you(username)
         await disconnect()
         return
-
-    # 如果没有 CONNECT，我就直接退出（因为规范里不会给乱的输入）
+    
     await disconnect()
     return
 
