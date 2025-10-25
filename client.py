@@ -33,7 +33,7 @@ from typing import Any, Dict, Optional, Literal
 
 # ----------------- debug toggle -----------------
 
-DEBUG = False  # set False to silence debug output
+DEBUG = True  # set False to silence debug output
 
 def dprint(*args, **kwargs):
     if DEBUG:
@@ -247,9 +247,11 @@ async def handle_server_messages() -> None:
                             asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit) if tlimit else None
                         )
+                        dprint(f"[debug] raw answer: {raw}")
                         if raw:
                             raw = raw.strip()
                             ans = raw if raw else None
+                            dprint(f"[debug] stripped raw answer: {raw}")
                         else:
                             ans = None
                     except asyncio.TimeoutError:
@@ -257,6 +259,8 @@ async def handle_server_messages() -> None:
                         ans = None
                     except Exception:
                         ans = None
+
+                    dprint(f"[debug] b4 sending answer: {raw}")
 
                     if ans is not None and ans != "":
                         dprint(f"[debug] sending user answer: {ans}")
