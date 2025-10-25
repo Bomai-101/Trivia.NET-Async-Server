@@ -463,7 +463,7 @@ async def main_async():
             pass
         sys.exit(0)
 
-    # mode you: interactive. DO NOT auto-connect.
+    # mode you: interactive. DO NOT auto-connect .
     # two sub-cases:
     #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
     #   b) grader runs us interactively (rare in auto tests, but fine)
