@@ -369,7 +369,7 @@ async def broadcast(msg: Dict[str, Any]) -> None:
 # -------------------------------------------------------------------
 
 async def coordinator() -> None:
-    # Wait until we've seen enough HI's total (not necessarily still connected)
+    # Wait until we've seen enough players (or at least enough distinct usernames)
     await READY.wait()
 
     qtypes = CFG.get("question_types", []) or []
@@ -383,22 +383,22 @@ async def coordinator() -> None:
     except Exception:
         ready_info = ready_info_tpl
 
-    # Tell players game is starting
+    # Broadcast READY to all connected players
     await broadcast({
         "message_type": "READY",
         "info": ready_info
     })
 
-    # Ask each question in order
+    total_questions = len(qtypes)
+
     for i, qtype in enumerate(qtypes, start=1):
-        # clear answers for this round
+        # Clear answers for this round
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # get short form question from questions.py
+        # Generate the question content
         short_q = get_short_question_for(qtype)
 
-        # build the pretty trivia_question text using config's question_formats
         fmt = QUESTION_FORMATS.get(qtype)
         if fmt:
             try:
@@ -408,10 +408,9 @@ async def coordinator() -> None:
         else:
             question_line = short_q
 
-        # e.g. "Question 1 (Mathematics):\n63 - 41 + 19 - 41 + 39"
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
 
-        # send QUESTION
+        # Broadcast QUESTION
         await broadcast({
             "message_type": "QUESTION",
             "question_type": qtype,
@@ -420,18 +419,14 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
 
-        # wait for answers
-        # IMPORTANT: add a grace buffer so we don't miss slightly-late ANSWER
+        # Allow players time to answer (+ small grace buffer to avoid race with ANSWER arrival)
         try:
             await asyncio.sleep(float(qsec) + 0.3)
         except Exception:
             await asyncio.sleep(0)
 
-        # Now score and reply RESULT per-player
-        ok_tpl = CFG.get(
-            "correct_answer",
-            "{answer} is correct!"
-        )
+        # Score and send RESULT to each player individually
+        ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
         bad_tpl = CFG.get(
             "incorrect_answer",
             "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
@@ -453,44 +448,43 @@ async def coordinator() -> None:
                 correct_str = correct_full
                 ok = (ans == correct_full)
 
-            # update score if correct
             if ok:
                 p["score"] += 1
 
-            # fill feedback template
             feedback = format_feedback(
                 ok_tpl if ok else bad_tpl,
                 ans,
                 correct_str
             )
 
-            # send RESULT directly to that player
             await send_line(p["w"], {
                 "message_type": "RESULT",
                 "correct": bool(ok),
                 "feedback": feedback
             })
 
-        # send LEADERBOARD to everyone
-        state = build_leaderboard_state()
-        await broadcast({
-            "message_type": "LEADERBOARD",
-            "state": state
-        })
+        # Branch: non-final question vs final question
+        if i < total_questions:
+            # Not the last question: send LEADERBOARD and then optional gap before next question
+            state = build_leaderboard_state()
+            await broadcast({
+                "message_type": "LEADERBOARD",
+                "state": state
+            })
 
-        # pause between questions if configured
-        if i < len(qtypes) and qgap:
-            try:
-                await asyncio.sleep(float(qgap))
-            except Exception:
-                await asyncio.sleep(0)
+            if qgap:
+                try:
+                    await asyncio.sleep(float(qgap))
+                except Exception:
+                    await asyncio.sleep(0)
+        else:
+            # Last question: send FINISHED instead of LEADERBOARD
+            final_text = build_final_standings()
+            await broadcast({
+                "message_type": "FINISHED",
+                "final_standings": final_text
+            })
 
-    # After last question: send FINISHED with final standings
-    final_text = build_final_standings()
-    await broadcast({
-        "message_type": "FINISHED",
-        "final_standings": final_text
-    })
 
 # -------------------------------------------------------------------
 # Config / main
