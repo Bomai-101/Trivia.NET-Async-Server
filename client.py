@@ -299,7 +299,7 @@ async def cmd_connect(host: str, port: int) -> None:
 
     # This line was previously commented out.
     # We restore it because some tests may expect it.
-    print(f"[client] connected to {host}:{port}")
+    dprint(f"[client] connected to {host}:{port}")
 
     hi_msg = {
         "message_type": "HI",
@@ -326,7 +326,7 @@ async def cmd_disconnect() -> None:
     except Exception:
         pass
     CONN.clear()
-    print("[client] disconnected")
+    dprint("[client] disconnected")
     EXIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
@@ -344,7 +344,7 @@ async def handle_command(line: str) -> None:
 
     if up == "EXIT":
         await cmd_disconnect()
-        print("[client] exiting...")
+        dprint("[client] exiting...")
         sys.exit(0)
 
     if up.startswith("CONNECT"):
@@ -355,7 +355,7 @@ async def handle_command(line: str) -> None:
         if len(parts) == 1:
             # just CONNECT with no host:port
             # -> that's ambiguous. we won't guess.
-            print("[client] usage: CONNECT <host>:<port>")
+            dprint("[client] usage: CONNECT <host>:<port>")
             return
         try:
             host, port_s = parts[1].split(":", 1)
@@ -475,7 +475,7 @@ async def main_async():
         sys.exit(0)
 
     # interactive TTY case:
-    print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
+    dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
 
