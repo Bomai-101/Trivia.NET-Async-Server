@@ -463,7 +463,7 @@ async def coordinator() -> None:
                 "feedback": feedback
             })
 
-        # Branch: non-final question vs final question
+        # Branch: non-final question vs final  question
         if i < total_questions:
             # Not the last question: send LEADERBOARD and then optional gap before next question
             state = build_leaderboard_state()
