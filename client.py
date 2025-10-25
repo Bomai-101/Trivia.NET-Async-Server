@@ -247,11 +247,12 @@ async def handle_server_messages() -> None:
                             asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit) if tlimit else None
                         )
-                        dprint(f"[debug] raw answer: {raw}")
-                        if raw:
+                        if raw is not None:
                             raw = raw.strip()
-                            ans = raw if raw else None
-                            dprint(f"[debug] stripped raw answer: {raw}")
+                            if raw != "":
+                                ans = raw
+                            else:
+                                ans = None
                         else:
                             ans = None
                     except asyncio.TimeoutError:
@@ -260,8 +261,6 @@ async def handle_server_messages() -> None:
                     except Exception:
                         ans = None
 
-                    dprint(f"[debug] b4 sending answer: {raw}")
-                    #print(f"[debug] b4 sending answer: {raw}")
                     if ans is not None and ans != "":
                         dprint(f"[debug] sending user answer: {ans}")
                         await send_line(writer, {
@@ -270,6 +269,7 @@ async def handle_server_messages() -> None:
                         })
                     else:
                         dprint("[debug] no answer sent (timeout or empty input)")
+
 
 
 
