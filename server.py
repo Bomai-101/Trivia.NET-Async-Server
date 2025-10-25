@@ -518,7 +518,7 @@ async def main() -> None:
 
     global CFG, REQUIRED_PLAYERS, QUESTION_FORMATS
     CFG = load_server_config(cfg_path)
-    REQUIRED_PLAYERS = int(CFG.get("players", 2))
+    REQUIRED_PLAYERS = int(CFG.get("players", 1))
     QUESTION_FORMATS = CFG.get("question_formats", {}) or {}
 
     port = int(CFG.get("port", 5050))
