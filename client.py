@@ -295,7 +295,7 @@ async def cmd_connect(host: str, port: int) -> None:
 
     CONN.reader, CONN.writer = reader, writer
 
-    print(f"[client] connected to {host}:{port}")
+    #print(f"[client] connected to {host}:{port}")
 
     hi_msg = {
         "message_type": "HI",
