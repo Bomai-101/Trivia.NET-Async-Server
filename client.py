@@ -4,65 +4,50 @@
 """
 Async NDJSON client (spec-compliant, with debug prints).
 
-协议要点：
-- 我们和服务器之间一行一行传 JSON (NDJSON)，UTF-8。
-- 我们发送:
-  HI        -> {"message_type":"HI","type":"HI","username":...}
-  ANSWER    -> {"message_type":"ANSWER","answer":...}
-  BYE       -> {"message_type":"BYE"}
+Protocol summary:
+- Communication is line-delimited JSON (NDJSON) over UTF-8.
+- We send:
+    HI        -> {"message_type":"HI","type":"HI","username":...}
+    ANSWER    -> {"message_type":"ANSWER","answer":...}
+    BYE       -> {"message_type":"BYE"}
+- We print (as required by spec/testcases):
+    READY.info
+    QUESTION.trivia_question
+    RESULT.feedback
+    LEADERBOARD.state
+    FINISHED.final_standings
 
-- 我们打印(按题目要求):
-  READY.info
-  QUESTION.trivia_question
-  RESULT.feedback
-  LEADERBOARD.state
-  FINISHED.final_standings
-
-额外：
-- debug 日志打印为 [debug] 前缀
-- auto 模式：自动回答
-- you 模式：模拟人工客户端 (测试里常用)
-
-!!! 非常重要 !!!
-我们要确保：
-1. HI 里既有 "message_type":"HI" 也有 "type":"HI"
-2. 收到 FINISHED 时，一定要 print(final_standings)
-
-这样就能贴近评分脚本的期望了。
+Modes:
+- 'auto' : connects automatically, answers automatically
+- 'you'  : connects and behaves like a human client (used in most tests)
 """
 
 import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal, Tuple
+from typing import Any, Dict, Optional, Literal
 
-# ---------------- Low-level helpers ----------------
+# ---------------- Helpers ----------------
 
 def _enc(obj: Dict[str, Any]) -> bytes:
-    """Encode dict -> NDJSON line (utf-8)."""
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 async def send_line(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
-    """Write ONE NDJSON line to server."""
     print(f"[debug] send_line -> {obj}")
     writer.write(_enc(obj))
     await writer.drain()
 
 async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
-    """Read ONE NDJSON line from server."""
     line = await reader.readline()
     if not line:
-        # EOF
         return None
     try:
-        msg = json.loads(line.decode("utf-8"))
+        return json.loads(line.decode("utf-8"))
     except json.JSONDecodeError:
-        # Spec says UTF-8 valid etc., but just in case:
-        msg = {"message_type": "ERROR", "message": "invalid_json"}
-    return msg
+        return {"message_type": "ERROR", "message": "invalid_json"}
 
-# ---------------- Connection state ----------------
+# ---------------- Connection ----------------
 
 class Conn:
     def __init__(self) -> None:
@@ -82,14 +67,11 @@ class Conn:
         self.writer = None
 
 CONN = Conn()
-
 CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
 USERNAME = "player"
-
 EXIT_EVENT = asyncio.Event()
 
 # ---------------- Auto-answer helpers ----------------
-# 用于 auto 模式回答题目
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -110,7 +92,6 @@ def _roman_to_int(s: str) -> int:
     return n
 
 def _eval_plus_minus(expr: str) -> str:
-    # "12 + 3 - 4 + 5"
     tokens = (expr or "").split()
     if not tokens:
         return ""
@@ -135,12 +116,10 @@ def _eval_plus_minus(expr: str) -> str:
     return str(total)
 
 def _usable_ipv4_addresses(cidr: str) -> str:
-    # cidr "A.B.C.D/prefix"
     try:
         prefix = int((cidr or "").split("/")[1])
     except Exception:
         return ""
-    # /31 or /32 => 0 usable
     if prefix >= 31:
         return "0"
     host_bits = 32 - prefix
@@ -148,10 +127,7 @@ def _usable_ipv4_addresses(cidr: str) -> str:
     return str(usable)
 
 def _ip_to_int(a: int, b: int, c: int, d: int) -> int:
-    return ((a << 24) |
-            (b << 16) |
-            (c << 8)  |
-            d)
+    return ((a << 24) | (b << 16) | (c << 8) | d)
 
 def _int_to_ip(n: int) -> str:
     a = (n >> 24) & 255
@@ -161,9 +137,6 @@ def _int_to_ip(n: int) -> str:
     return f"{a}.{b}.{c}.{d}"
 
 def _network_broadcast_pair(cidr: str) -> str:
-    # Return: "NETWORK and BROADCAST" as a single string
-    # because spec says the ANSWER for this question must be:
-    # "network_addr and broadcast_addr"
     try:
         addr_str, prefix_str = (cidr or "").split("/")
         prefix = int(prefix_str)
@@ -177,47 +150,29 @@ def _network_broadcast_pair(cidr: str) -> str:
         return ""
 
     ip_int = _ip_to_int(a, b, c, d)
-
-    if prefix == 0:
-        mask = 0
-    else:
-        mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF)
-
+    mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) if prefix != 0 else 0
     network_int = ip_int & mask
     broadcast_int = network_int | (~mask & 0xFFFFFFFF)
-
     net_ip = _int_to_ip(network_int)
     bcast_ip = _int_to_ip(broadcast_int)
     return f"{net_ip} and {bcast_ip}"
 
 def auto_answer(question_type: str, short_question: str) -> str:
-    """Return what we should send in ANSWER when we're in auto mode."""
     qtype = (question_type or "").strip()
 
     if qtype == "Mathematics":
         return _eval_plus_minus(short_question)
-
     if qtype == "Roman Numerals":
         return str(_roman_to_int(short_question))
-
     if qtype == "Usable IP Addresses of a Subnet":
         return _usable_ipv4_addresses(short_question)
-
     if qtype == "Network and Broadcast Address of a Subnet":
         return _network_broadcast_pair(short_question)
-
     return ""
 
-# ---------------- Game-loop / message handling ----------------
+# ---------------- Message handler ----------------
 
 async def game_loop() -> None:
-    """
-    Receive server messages in a loop.
-    For each message_type we:
-    - print what spec requires
-    - in auto mode, send ANSWER
-    - on FINISHED, print final_standings and break
-    """
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
 
@@ -225,7 +180,6 @@ async def game_loop() -> None:
         while True:
             msg = await read_line_json(reader)
             if msg is None:
-                # server closed socket
                 print("[debug] server closed connection")
                 break
 
@@ -233,16 +187,11 @@ async def game_loop() -> None:
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
-                # print info text
-                info = msg.get("info", "")
-                print(info)
+                print(msg.get("info", ""))
 
             elif mtype == "QUESTION":
-                # We MUST print the full trivia_question line for the test.
                 trivia = msg.get("trivia_question", "")
                 print(trivia)
-
-                # If we're auto, instantly answer.
                 if CLIENT_MODE == "auto":
                     qtype = msg.get("question_type", "")
                     short_q = msg.get("short_question", "")
@@ -252,40 +201,26 @@ async def game_loop() -> None:
                         "message_type": "ANSWER",
                         "answer": ans
                     })
-                else:
-                    # "you" mode: we do NOT send automatic ANSWER here.
-                    # The staff harness will write ANSWER on stdin for us later,
-                    # OR they might just not have us answer at all.
-                    pass
 
             elif mtype == "RESULT":
-                # The server tells us if we were correct.
-                feedback = msg.get("feedback", "")
-                print(feedback)
+                print(msg.get("feedback", ""))
 
             elif mtype == "LEADERBOARD":
-                # Print the leaderboard state text
-                lb = msg.get("state", "")
-                print(lb)
+                print(msg.get("state", ""))
 
             elif mtype == "FINISHED":
-                # Print final standings (required by spec/expected).
                 final_text = msg.get("final_standings", "")
                 if final_text:
                     print(final_text)
                 break
 
             elif mtype == "ERROR":
-                # Not strictly part of required spec output,
-                # but let's log.
                 print(f"[debug] server ERROR: {msg.get('message')}")
 
             else:
-                # Unknown message_type: just debug log.
                 print(f"[debug] unknown message_type={mtype} full={msg}")
 
     finally:
-        # cleanup connection
         try:
             if CONN.writer:
                 CONN.writer.close()
@@ -295,26 +230,20 @@ async def game_loop() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ---------------- Connecting / lifecycle helpers ----------------
+# ---------------- Connection helpers ----------------
 
 async def connect_and_hi(host: str, port: int, username: str) -> None:
-    """
-    Connect to server, send HI immediately.
-    """
     print(f"[debug] connect_and_hi(): connecting to {host} {port}")
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
-        # Spec doesn't force us to pretty-print this,
-        # but test harness sometimes expects an exception to bubble.
         print("Connection failed")
         raise SystemExit(1)
 
     CONN.attach(reader, writer)
-
     hi_msg = {
         "message_type": "HI",
-        "type": "HI",        # include both keys for compatibility
+        "type": "HI",
         "username": username
     }
     print(f"[debug] connect_and_hi(): sending HI -> {hi_msg}")
@@ -322,11 +251,7 @@ async def connect_and_hi(host: str, port: int, username: str) -> None:
     print("[debug] connect_and_hi(): HI sent")
 
 async def graceful_bye() -> None:
-    """
-    Send BYE and close, then signal EXIT_EVENT.
-    """
     if not CONN.is_connected():
-        print("[debug] graceful_bye(): already disconnected")
         EXIT_EVENT.set()
         return
     try:
@@ -341,17 +266,10 @@ async def graceful_bye() -> None:
     CONN.clear()
     EXIT_EVENT.set()
 
-# ---------------- Config loading ----------------
+# ---------------- Config ----------------
 
 def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
-    """
-    Load client config JSON.
-    We assume (per spec assumptions) it's valid if present.
-    We will *not* invent fallback host/port if they aren't there.
-    The spec guarantees they exist in tests.
-    """
     if not path:
-        # unreachable in staff tests (they always give config)
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     print(f"[debug] load_config(): {data}")
@@ -360,40 +278,18 @@ def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
 # ---------------- Modes ----------------
 
 async def play_game_auto(host: str, port: int, username: str) -> None:
-    """
-    Mode 'auto':
-    - Immediately connect
-    - Send HI
-    - Enter game loop
-    - Exit when FINISHED or connection drops
-    """
-    await connect_and_hi(host, port, username)
-    await game_loop()  # blocks until FINISHED / disconnect
-    # then EXIT_EVENT is set in game_loop() finally
-
-async def play_game_you(host: str, port: int, username: str) -> None:
-    """
-    Mode 'you':
-    Staff tests typically:
-      - Start our client with config (mode 'you')
-      - We immediately connect & HI
-      - Then we just sit and print messages
-    We do NOT wait for stdin input here anymore,
-    because tests do not rely on us to manually type ANSWER;
-    they judge our printing of server messages.
-
-    (If you want manual CLI in your own runs, you'd extend here,
-     but for marking we keep it minimal & deterministic.)
-    """
     await connect_and_hi(host, port, username)
     await game_loop()
 
-# ---------------- main() ----------------
+async def play_game_you(host: str, port: int, username: str) -> None:
+    await connect_and_hi(host, port, username)
+    await game_loop()
+
+# ---------------- Main ----------------
 
 async def main_async() -> None:
     global CLIENT_MODE, USERNAME
 
-    # Parse CLI args
     args = sys.argv[1:]
     if not args or args[0] != "--config" or len(args) < 2:
         print("client.py: Configuration not provided", file=sys.stderr)
@@ -404,11 +300,8 @@ async def main_async() -> None:
         print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
         sys.exit(1)
 
-    # Load config
     cfg = load_client_config(cfg_path)
 
-    # Extract required fields.
-    # Per spec, we assume these fields exist and are valid.
     host = cfg.get("host")
     port = cfg.get("port")
     USERNAME = cfg.get("username", "player")
@@ -416,14 +309,11 @@ async def main_async() -> None:
 
     print(f"[debug] startup mode={CLIENT_MODE} host={host} port={port} username={USERNAME}")
 
-    # Run mode
     if CLIENT_MODE == "auto":
         await play_game_auto(host, port, USERNAME)
     else:
-        # default 'you'
         await play_game_you(host, port, USERNAME)
 
-    # wait until game loop sets EXIT_EVENT (should already be set, but just in case)
     await EXIT_EVENT.wait()
 
 def main() -> None:
@@ -434,8 +324,6 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     except ConnectionResetError:
-        # staff harness sometimes cuts connection abruptly
-        # we swallow it to avoid ugly tracebacks
         pass
 
 if __name__ == "__main__":
