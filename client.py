@@ -11,14 +11,13 @@ Modes:
                DISCONNECT
                EXIT
            After CONNECT succeeds we send HI to that server and then
-           we just print whatever the server sends. We do NOT auto-answer.
+           we just print whatever the server sends. We do NOT auto-answer
+           automatically (the human / test provides answers).
 
   - "auto": bot mode. We immediately connect to host/port from config,
             send HI, then auto-answer questions.
 
-  - "ai": same connection behavior as "auto" (immediate connect),
-          currently answers using the same auto-answer logic.
-          (You could later customize if needed.)
+  - "ai": same as "auto" for now.
 
 IMPORTANT:
   HI must be exactly {"message_type": "HI", "username": <USERNAME>}
@@ -70,6 +69,11 @@ CONN = Conn()
 CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
+
+# NEW: queue of pending answers for "you" mode.
+# - interactive TTY: we'll push user-typed answers here in interactive_loop()
+# - non-interactive / one-shot stdin path: we don't use it (you asked to keep that block unchanged)
+ANSWER_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 
 # ----------------- auto-answer helpers -----------------
 
@@ -202,13 +206,12 @@ async def handle_server_messages() -> None:
                 print("[debug] server closed connection")
                 break
 
-            # debug dump (extra output is allowed)
+            # debug dump
             print(f"[debug] received: {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
-                # spec: print the info string
                 info = msg.get("info", "")
                 print(info)
 
@@ -217,11 +220,11 @@ async def handle_server_messages() -> None:
                 qtype = msg.get("question_type", "")
                 short_q = msg.get("short_question", "")
 
-                # spec: print the 'trivia_question' line
+                # spec: print the 'trivia_question' text
                 print(trivia)
 
-                # only auto/ai modes auto-answer
                 if CLIENT_MODE in ("auto", "ai"):
+                    # auto and ai: compute answer immediately
                     ans = auto_answer(qtype, short_q)
                     print(f"[debug] answering with: {ans}")
                     await send_line(writer, {
@@ -229,10 +232,18 @@ async def handle_server_messages() -> None:
                         "answer": ans
                     })
                 else:
-                    # mode "you": do NOT auto-answer.
-                    # the human / grader may send ANSWER separately,
-                    # or maybe they won't, doesn't matter.
-                    pass
+                    # mode "you":
+                    # We now actually wait for an answer from stdin (via ANSWER_QUEUE).
+                    # interactive_loop() will push user-typed answers here.
+                    try:
+                        ans = await ANSWER_QUEUE.get()
+                    except Exception:
+                        ans = ""
+
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ans
+                    })
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -274,7 +285,6 @@ async def cmd_connect(host: str, port: int) -> None:
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
-        # this matches staff test style: "Connection failed"
         print("Connection failed")
         raise SystemExit(1)
 
@@ -290,7 +300,6 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, hi_msg)
     print("[debug] HI sent")
 
-    # begin reading server messages in background
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
@@ -329,13 +338,8 @@ async def handle_command(line: str) -> None:
         sys.exit(0)
 
     if up.startswith("CONNECT"):
-        # patterns:
-        #   CONNECT
-        #   CONNECT host:port
         parts = cmd.split(maxsplit=1)
         if len(parts) == 1:
-            # just CONNECT with no host:port
-            # -> that's ambiguous. we won't guess.
             print("[client] usage: CONNECT <host>:<port>")
             return
         try:
@@ -349,8 +353,9 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
-    # unknown
-    print(f"[debug] unknown command from stdin: {cmd}")
+    # Otherwise: this is NOT a control command.
+    # Treat it as an answer to the most recent QUESTION.
+    ANSWER_QUEUE.put_nowait(cmd)
 
 # ----------------- config and main -----------------
 
@@ -374,9 +379,10 @@ async def interactive_loop() -> None:
     """
     Mode 'you':
     - DO NOT auto-connect.
-    - We read commands from stdin.
-    - The grader will feed us lines like "CONNECT 127.0.0.1:54321".
-    - We keep running until EXIT_EVENT is set or we sys.exit().
+    - We read lines from stdin forever.
+    - If a line is CONNECT / DISCONNECT / EXIT -> goes to handle_command()
+    - Otherwise we treat the line as an ANSWER for the next QUESTION.
+    - We keep running until EXIT_EVENT is set or EXIT is typed.
     """
     q: asyncio.Queue[str] = asyncio.Queue()
 
@@ -389,7 +395,6 @@ async def interactive_loop() -> None:
 
     asyncio.create_task(stdin_reader())
 
-    # We also keep watching EXIT_EVENT so we can stop when server finishes.
     while True:
         done, _ = await asyncio.wait(
             {
@@ -404,6 +409,8 @@ async def interactive_loop() -> None:
 
         for t in done:
             line = t.result()
+            # route it through handle_command, which now
+            # either runs control (CONNECT/etc) or enqueues as answer
             await handle_command(line)
 
 async def main_async():
@@ -430,18 +437,16 @@ async def main_async():
 
     print(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
+    # auto / ai: connect immediately and auto-answer
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         print("[debug] waiting for server messages in auto/ai mode")
         await EXIT_EVENT.wait()
         sys.exit(0)
 
-    # mode you: interactive. DO NOT auto-connect.
-    # two sub-cases:
-    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
-    #   b) grader runs us interactively (rare in auto tests, but fine)
-
+    # you mode:
+    # we KEEP your original non-interactive pipeline branch EXACTLY,
+    # as you requested.
     if not sys.stdin.isatty():
         # non-interactive pipeline: read one line from stdin, run it, then exit
         line = await asyncio.to_thread(sys.stdin.readline)
