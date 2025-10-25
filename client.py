@@ -286,13 +286,14 @@ async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
         dprint("[debug] already connected (cmd_connect ignored)")
         return
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-    except Exception:
-        # this matches staff test style: "Connection failed"
+    for _ in range(5):  # retry up to 5 times
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            break
+        except Exception:
+            await asyncio.sleep(0.2)
+    else:
         print("Connection failed")
-        # IMPORTANT: do NOT raise SystemExit(1) anymore.
-        # Just return so we don't kill the whole test runner.
         return
 
     CONN.reader, CONN.writer = reader, writer
