@@ -243,18 +243,22 @@ async def handle_server_messages() -> None:
                     ans = None
                     try:
                         dprint(f"[debug] waiting for user input (limit={tlimit}s)...")
-                        ans = await asyncio.wait_for(
+                        raw = await asyncio.wait_for(
                             asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit) if tlimit else None
                         )
-                        ans = (ans or "").strip()
+                        if raw:
+                            raw = raw.strip()
+                            ans = raw if raw else None
+                        else:
+                            ans = None
                     except asyncio.TimeoutError:
                         dprint("[debug] time_limit reached, skipping this question")
                         ans = None
                     except Exception:
                         ans = None
 
-                    if ans:
+                    if ans is not None:
                         dprint(f"[debug] sending user answer: {ans}")
                         await send_line(writer, {
                             "message_type": "ANSWER",
@@ -262,7 +266,7 @@ async def handle_server_messages() -> None:
                         })
                     else:
                         dprint("[debug] no answer sent (timeout or empty input)")
-                        pass
+
 
 
             elif mtype == "RESULT":
