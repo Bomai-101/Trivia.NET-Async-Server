@@ -7,6 +7,16 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 
+# ===================== DEBUG SWITCH =====================
+DEBUG = True  # <-- set to False before final submission
+# ========================================================
+
+def dprint(*args: Any, **kwargs: Any) -> None:
+    """debug print: only prints when DEBUG == True."""
+    if DEBUG:
+        print("[debug]", *args, **kwargs)
+
+
 # -------------------- util io --------------------
 
 def _enc(obj: Dict[str, Any]) -> bytes:
@@ -14,21 +24,25 @@ def _enc(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
 async def send_line(w: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    dprint("send_line ->", obj)
     w.write(_enc(obj))
     await w.drain()
 
 async def read_line_json(r: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
     line = await r.readline()
     if not line:
+        dprint("read_line_json <- EOF")
         return None
-    return json.loads(line.decode("utf-8"))
+    raw = line.decode("utf-8")
+    dprint("read_line_json <- raw:", raw.rstrip("\n"))
+    return json.loads(raw)
 
 # -------------------- connection holder --------------------
 
 class Conn:
     def __init__(self) -> None:
         self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
+        self.writer: Optional(asyncio.StreamWriter) = None
 
     def is_connected(self) -> bool:
         return self.reader is not None and self.writer is not None
@@ -36,8 +50,10 @@ class Conn:
     def attach(self, r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
         self.reader = r
         self.writer = w
+        dprint("Conn.attach(): connection established")
 
     def clear(self) -> None:
+        dprint("Conn.clear(): dropping connection refs")
         self.reader = None
         self.writer = None
 
@@ -57,15 +73,17 @@ def _roman_to_int(s: str) -> int:
     while i < len(s):
         if i+1 < len(s) and s[i:i+2] in ROMAN:
             n += ROMAN[s[i:i+2]]
+            dprint("roman pair", s[i:i+2], "=>", n)
             i += 2
         else:
             n += ROMAN[s[i]]
+            dprint("roman char", s[i], "=>", n)
             i += 1
     return n
 
 def _eval_plus_minus(expr: str) -> str:
-    # "12 + 3 - 4 + 5"
     toks = expr.split()
+    dprint("_eval_plus_minus toks:", toks)
     if not toks:
         return ""
     total = int(toks[0])
@@ -73,20 +91,25 @@ def _eval_plus_minus(expr: str) -> str:
     while i < len(toks) - 1:
         op = toks[i]
         val = int(toks[i+1])
+        dprint("math step:", total, op, val)
         if op == "+":
             total += val
         elif op == "-":
             total -= val
         i += 2
+    dprint("math result:", total)
     return str(total)
 
 def _usable_ipv4_addresses(cidr: str) -> str:
-    # A.B.C.D/prefix
-    prefix = int(cidr.split("/")[1])
+    # "A.B.C.D/prefix"
+    ip_str, pref_str = cidr.split("/")
+    prefix = int(pref_str)
+    dprint("usable_ipv4", cidr, "prefix=", prefix)
     if prefix >= 31:
         return "0"
     host_bits = 32 - prefix
     usable = (1 << host_bits) - 2
+    dprint("host_bits=", host_bits, "usable=", usable)
     return str(usable)
 
 def _ip_to_int(a: int, b: int, c: int, d: int) -> int:
@@ -96,12 +119,13 @@ def _int_to_ip(x: int) -> str:
     return f"{(x>>24)&255}.{(x>>16)&255}.{(x>>8)&255}.{x&255}"
 
 def _network_broadcast_pair(cidr: str) -> str:
-    # return "NET and BROADCAST" exactly like server expects client ANSWER
+    # returns "NETWORK and BROADCAST" which we then send as the ANSWER string
     ip_str, pref_str = cidr.split("/")
     prefix = int(pref_str)
     a, b, c, d = map(int, ip_str.split("."))
 
     ip_int = _ip_to_int(a,b,c,d)
+
     if prefix == 0:
         mask = 0
     else:
@@ -112,31 +136,38 @@ def _network_broadcast_pair(cidr: str) -> str:
 
     net_ip = _int_to_ip(net_int)
     bcast_ip = _int_to_ip(bcast_int)
+
+    dprint("network/broadcast for", cidr, "=>", net_ip, "and", bcast_ip)
     return f"{net_ip} and {bcast_ip}"
 
 def auto_answer(question_type: str, short_q: str) -> str:
-    qtype = question_type.strip()
-    if qtype == "Mathematics":
+    qt = question_type.strip()
+    dprint("auto_answer:", qt, "| short_q:", short_q)
+    if qt == "Mathematics":
         return _eval_plus_minus(short_q)
-    if qtype == "Roman Numerals":
+    if qt == "Roman Numerals":
         return str(_roman_to_int(short_q))
-    if qtype == "Usable IP Addresses of a Subnet":
+    if qt == "Usable IP Addresses of a Subnet":
         return _usable_ipv4_addresses(short_q)
-    if qtype == "Network and Broadcast Address of a Subnet":
+    if qt == "Network and Broadcast Address of a Subnet":
         return _network_broadcast_pair(short_q)
     return ""
 
-# -------------------- core receive loop --------------------
+# -------------------- core receive loops --------------------
 
 async def play_game_auto(username: str) -> None:
-    # auto/ai mode: automatically answer once per QUESTION
+    """Mode auto/ai: answer automatically."""
     assert CONN.reader and CONN.writer
     r, w = CONN.reader, CONN.writer
+    dprint("play_game_auto(): start listening")
+
     while True:
         msg = await read_line_json(r)
         if msg is None:
+            dprint("play_game_auto(): server closed")
             break
 
+        dprint("play_game_auto(): got msg:", msg)
         mtype = str(msg.get("message_type", "")).upper()
 
         if mtype == "READY":
@@ -148,11 +179,12 @@ async def play_game_auto(username: str) -> None:
             trivia = msg.get("trivia_question", "")
             short_q = msg.get("short_question", "")
 
-            # print the trivia question text (spec: client prints it)
+            # print actual question text (expected output)
             print(trivia)
 
-            # send ANSWER automatically
+            # compute + send answer
             ans = auto_answer(qtype, short_q)
+            dprint("auto sending ANSWER:", ans)
             await send_line(w, {
                 "message_type": "ANSWER",
                 "answer": ans
@@ -169,107 +201,135 @@ async def play_game_auto(username: str) -> None:
         elif mtype == "FINISHED":
             final_msg = msg.get("final_standings", "")
             print(final_msg)
+            dprint("play_game_auto(): FINISHED received, end loop")
             break
 
         elif mtype == "ERROR":
-            err = msg.get("message", "")
-            print(f"[server] ERROR {err}")
-
+            print(f"[server] ERROR {msg.get('message','')}")
         else:
-            # ignore unknown types
-            pass
+            dprint("play_game_auto(): unknown message_type", mtype)
 
 async def play_game_you(username: str) -> None:
-    # "you" mode: no auto-answer.
-    # we still print READY/QUESTION/RESULT etc exactly like in auto mode,
-    # but we DO NOT calculate answer automatically. We wait for user input
-    # after each QUESTION and send that as ANSWER (at most once).
+    """
+    Mode you:
+    - print READY/QUESTION/RESULT/etc
+    - after each QUESTION, wait for user's line (stdin) to send that as ANSWER
+    - we do not auto-answer
+    """
     assert CONN.reader and CONN.writer
     r, w = CONN.reader, CONN.writer
+    dprint("play_game_you(): start listening")
 
-    # We'll create a small queue to read stdin lines asynchronously
     ans_queue: asyncio.Queue[str] = asyncio.Queue()
 
     async def stdin_task():
-        # keep reading lines from stdin and push to queue
+        # continuously read stdin lines into queue
         for line in sys.stdin:
-            await ans_queue.put(line.rstrip("\r\n"))
+            text = line.rstrip("\r\n")
+            dprint("stdin_task captured:", text)
+            await ans_queue.put(text)
 
     asyncio.create_task(stdin_task())
 
     while True:
         msg = await read_line_json(r)
         if msg is None:
+            dprint("play_game_you(): server closed")
             break
 
+        dprint("play_game_you(): got msg:", msg)
         mtype = str(msg.get("message_type", "")).upper()
 
         if mtype == "READY":
-            print(msg.get("info", ""))
+            info = msg.get("info", "")
+            print(info)
 
         elif mtype == "QUESTION":
-            print(msg.get("trivia_question", ""))
+            trivia = msg.get("trivia_question", "")
+            print(trivia)
 
-            # wait for one line from user as their answer
+            # wait for user's manual answer up to the given time_limit
+            limit = msg.get("time_limit", 1)
+            dprint("waiting user answer up to", limit, "seconds")
             try:
-                user_ans = await asyncio.wait_for(ans_queue.get(), timeout=msg.get("time_limit", 1))
+                user_ans = await asyncio.wait_for(ans_queue.get(), timeout=limit)
             except asyncio.TimeoutError:
-                user_ans = ""  # didn't answer in time
+                dprint("timeout: no manual answer provided")
+                user_ans = ""
 
+            dprint("sending manual ANSWER:", user_ans)
             await send_line(w, {
                 "message_type": "ANSWER",
                 "answer": user_ans
             })
 
         elif mtype == "RESULT":
-            print(msg.get("feedback", ""))
+            fb = msg.get("feedback", "")
+            print(fb)
 
         elif mtype == "LEADERBOARD":
-            print(msg.get("state", ""))
+            state = msg.get("state", "")
+            print(state)
 
         elif mtype == "FINISHED":
-            print(msg.get("final_standings", ""))
+            final_msg = msg.get("final_standings", "")
+            print(final_msg)
+            dprint("play_game_you(): FINISHED -> end loop")
             break
 
         elif mtype == "ERROR":
             print(f"[server] ERROR {msg.get('message','')}")
-
         else:
-            pass
+            dprint("play_game_you(): unknown message_type", mtype)
 
 # -------------------- connection helpers --------------------
 
 async def connect_and_hi(host: str, port: int, username: str) -> None:
+    dprint("connect_and_hi(): connecting to", host, port)
     r, w = await asyncio.open_connection(host, port)
     CONN.attach(r, w)
-    # HI exactly as spec: ONLY message_type and username
-    await send_line(w, {
+
+    hi_msg = {
         "message_type": "HI",
         "username": username
-    })
+    }
+    dprint("connect_and_hi(): sending HI ->", hi_msg)
+    await send_line(w, hi_msg)
+    dprint("connect_and_hi(): HI sent")
 
 async def disconnect() -> None:
     if CONN.is_connected() and CONN.writer:
+        dprint("disconnect(): sending BYE")
         try:
             await send_line(CONN.writer, {"message_type": "BYE"})
-        except Exception:
-            pass
+        except Exception as e:
+            dprint("disconnect(): error sending BYE", e)
+
         try:
+            dprint("disconnect(): closing writer")
             CONN.writer.close()
             await CONN.writer.wait_closed()
-        except Exception:
-            pass
+        except Exception as e:
+            dprint("disconnect(): error closing writer", e)
+
     CONN.clear()
+    dprint("disconnect(): done")
 
 # -------------------- config + main --------------------
 
 def load_config(path: Path) -> Dict[str, Any]:
-    text = path.read_text(encoding="utf-8")
-    return json.loads(text)
+    # no defaults, trust spec that config exists and is valid
+    raw = path.read_text(encoding="utf-8")
+    cfg = json.loads(raw)
+    dprint("load_config():", cfg)
+    return cfg
 
 async def main_async():
+    # We follow spec strictly:
+    # must be run as: python client.py --config <path>
     args = sys.argv[1:]
     if len(args) != 2 or args[0] != "--config":
+        dprint("main_async(): bad args", args)
         sys.exit(1)
 
     cfg_path = Path(args[1])
@@ -280,26 +340,41 @@ async def main_async():
     host: str = cfg.get("host")
     port: int = cfg.get("port")
 
+    dprint("startup mode=", mode, "host=", host, "port=", port, "username=", username)
 
-    if mode in ("auto","ai"):
+    if mode in ("auto", "ai"):
+        # connect immediately to host/port in config
         await connect_and_hi(host, port, username)
+        # then just auto-play until FINISHED and disconnect
         await play_game_auto(username)
         await disconnect()
         return
 
     # mode == "you"
-    # CONNECT <host>:<port>
+    # we must NOT auto-connect. We wait for stdin like:
+    #   CONNECT 127.0.0.1:12345
+    dprint("mode=you waiting for CONNECT line on stdin")
     first_line = await asyncio.to_thread(sys.stdin.readline)
-    first_line = first_line.strip()
+    if not first_line:
+        dprint("main_async(): stdin EOF before CONNECT")
+        await disconnect()
+        return
 
+    first_line = first_line.strip()
+    dprint("main_async(): got first_line:", first_line)
+
+    # expected "CONNECT host:port"
     if first_line.upper().startswith("CONNECT "):
         _, target = first_line.split(maxsplit=1)
         host2, port_s = target.split(":", 1)
+        dprint("main_async(): parsed CONNECT", host2, port_s)
+
         await connect_and_hi(host2, int(port_s), username)
         await play_game_you(username)
         await disconnect()
         return
-    
+
+    dprint("main_async(): no valid CONNECT, exiting")
     await disconnect()
     return
 
