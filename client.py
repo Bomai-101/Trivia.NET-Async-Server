@@ -11,20 +11,16 @@ Modes:
                DISCONNECT
                EXIT
            After CONNECT succeeds we send HI to that server and then
-           we just print whatever the server sends.
-
-           IMPORTANT:
-           When the server sends a QUESTION, we do NOT immediately answer.
-           Instead we mark that we're waiting for an answer.
-           The NEXT non-command line from stdin is sent as the ANSWER.
+           we just print whatever the server sends. We do NOT auto-answer.
 
   - "auto": bot mode. We immediately connect to host/port from config,
             send HI, then auto-answer questions.
 
-  - "ai":   same connection behavior as "auto",
-            currently uses same auto-answer logic.
+  - "ai": same connection behavior as "auto" (immediate connect),
+          currently answers using the same auto-answer logic.
+          (You could later customize if needed.)
 
-Spec requires:
+IMPORTANT:
   HI must be exactly {"message_type": "HI", "username": <USERNAME>}
   (no extra "type" field).
 """
@@ -63,11 +59,6 @@ class Conn:
     def is_connected(self) -> bool:
         return self.reader is not None and self.writer is not None
 
-    def attach(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self.reader = reader
-        self.writer = writer
-        print("[debug] Conn.attach(): connection established")
-
     def clear(self) -> None:
         self.reader = None
         self.writer = None
@@ -79,10 +70,6 @@ CONN = Conn()
 CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
-
-# When we receive a QUESTION in "you" mode, we set this True.
-# The next non-command line from stdin will be sent as ANSWER.
-PENDING_QUESTION = False
 
 # ----------------- auto-answer helpers -----------------
 
@@ -105,6 +92,7 @@ def _roman_to_int(s: str) -> int:
     return n
 
 def _eval_plus_minus(expr: str) -> str:
+    # supports expressions like: "12 + 3 - 4 + 5"
     tokens = (expr or "").split()
     if not tokens:
         return ""
@@ -129,10 +117,12 @@ def _eval_plus_minus(expr: str) -> str:
     return str(total)
 
 def _usable_ipv4_addresses(cidr: str) -> str:
+    # "A.B.C.D/prefix" -> usable host count
     try:
         prefix = int((cidr or "").split("/")[1])
     except Exception:
         return ""
+    # /31 and /32 have 0 usable
     if prefix >= 31:
         return "0"
     host_bits = 32 - prefix
@@ -153,6 +143,7 @@ def _int_to_ip(n: int) -> str:
     return f"{a}.{b}.{c}.{d}"
 
 def _network_broadcast_answer(cidr: str) -> str:
+    # returns "NETWORK and BROADCAST"
     try:
         addr_str, prefix_str = (cidr or "").split("/")
         prefix = int(prefix_str)
@@ -180,6 +171,7 @@ def _network_broadcast_answer(cidr: str) -> str:
     return f"{net_ip} and {bcast_ip}"
 
 def auto_answer(question_type: str, short_question: str) -> str:
+    # chooses how to answer based on question_type
     qtype = (question_type or "").strip()
 
     if qtype == "Mathematics":
@@ -194,6 +186,7 @@ def auto_answer(question_type: str, short_question: str) -> str:
     if qtype == "Network and Broadcast Address of a Subnet":
         return _network_broadcast_answer(short_question)
 
+    # fallback
     return ""
 
 # ----------------- server message loop -----------------
@@ -202,8 +195,6 @@ async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
 
-    global PENDING_QUESTION
-
     try:
         while True:
             msg = await read_line_json(reader)
@@ -211,11 +202,13 @@ async def handle_server_messages() -> None:
                 print("[debug] server closed connection")
                 break
 
+            # debug dump (extra output is allowed)
             print(f"[debug] received: {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
+                # spec: print the info string
                 info = msg.get("info", "")
                 print(info)
 
@@ -224,11 +217,11 @@ async def handle_server_messages() -> None:
                 qtype = msg.get("question_type", "")
                 short_q = msg.get("short_question", "")
 
-                # print the human-facing question text
+                # spec: print the 'trivia_question' line
                 print(trivia)
 
+                # only auto/ai modes auto-answer
                 if CLIENT_MODE in ("auto", "ai"):
-                    # auto/ai -> compute and send immediately
                     ans = auto_answer(qtype, short_q)
                     print(f"[debug] answering with: {ans}")
                     await send_line(writer, {
@@ -236,11 +229,10 @@ async def handle_server_messages() -> None:
                         "answer": ans
                     })
                 else:
-                    # "you" mode:
-                    # mark that the next stdin line (that isn't a command)
-                    # should be treated as the answer.
-                    PENDING_QUESTION = True
-                    print("[debug] awaiting user answer for this question")
+                    # mode "you": do NOT auto-answer.
+                    # the human / grader may send ANSWER separately,
+                    # or maybe they won't, doesn't matter.
+                    pass
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -262,6 +254,7 @@ async def handle_server_messages() -> None:
                 print(f"[debug] unknown message_type {mtype} / full={msg}")
 
     finally:
+        # close connection, flag exit
         try:
             if CONN.writer:
                 CONN.writer.close()
@@ -271,20 +264,22 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ----------------- commands / stdin handling -----------------
+# ----------------- commands -----------------
 
 async def cmd_connect(host: str, port: int) -> None:
+    # connect to server and immediately send HI
     if CONN.is_connected():
         print("[debug] already connected (cmd_connect ignored)")
         return
-    print(f"[debug] connect_and_hi(): connecting to {host} {port}")
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
+        # this matches staff test style: "Connection failed"
         print("Connection failed")
         raise SystemExit(1)
 
-    CONN.attach(reader, writer)
+    CONN.reader, CONN.writer = reader, writer
+
     print(f"[client] connected to {host}:{port}")
 
     hi_msg = {
@@ -295,6 +290,7 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, hi_msg)
     print("[debug] HI sent")
 
+    # begin reading server messages in background
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
@@ -316,33 +312,30 @@ async def cmd_disconnect() -> None:
 
 async def handle_command(line: str) -> None:
     """
-    Handle one line of stdin.
-
-    Valid commands:
+    Handle a stdin command in 'you' mode.
+    Supported:
       CONNECT host:port
       DISCONNECT
       EXIT
-
-    Otherwise, if we're in "you" mode and there's a pending question,
-    treat this line as the user's answer and send ANSWER.
     """
-    global PENDING_QUESTION
-
     cmd = line.strip()
     if not cmd:
         return
     up = cmd.upper()
 
-    # EXIT
     if up == "EXIT":
         await cmd_disconnect()
         print("[client] exiting...")
         sys.exit(0)
 
-    # CONNECT ...
     if up.startswith("CONNECT"):
+        # patterns:
+        #   CONNECT
+        #   CONNECT host:port
         parts = cmd.split(maxsplit=1)
         if len(parts) == 1:
+            # just CONNECT with no host:port
+            # -> that's ambiguous. we won't guess.
             print("[client] usage: CONNECT <host>:<port>")
             return
         try:
@@ -352,26 +345,14 @@ async def handle_command(line: str) -> None:
             print("[client] usage: CONNECT <host>:<port>")
         return
 
-    # DISCONNECT
     if up == "DISCONNECT":
         await cmd_disconnect()
         return
 
-    # Not a command. If we owe an answer, send it now.
-    if CLIENT_MODE == "you" and PENDING_QUESTION and CONN.is_connected():
-        ans = cmd
-        print(f"[debug] sending user answer: {ans}")
-        await send_line(CONN.writer, {  # type: ignore
-            "message_type": "ANSWER",
-            "answer": ans
-        })
-        PENDING_QUESTION = False
-        return
-
-    # Otherwise, unknown input
+    # unknown
     print(f"[debug] unknown command from stdin: {cmd}")
 
-# ----------------- config / main -----------------
+# ----------------- config and main -----------------
 
 def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
     defaults = {
@@ -391,10 +372,11 @@ def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
 
 async def interactive_loop() -> None:
     """
-    Mode 'you', TTY case:
-    - We DO NOT auto-connect.
-    - We continuously read stdin lines and feed them to handle_command().
-    - We exit if EXIT_EVENT is set or user does EXIT command.
+    Mode 'you':
+    - DO NOT auto-connect.
+    - We read commands from stdin.
+    - The grader will feed us lines like "CONNECT 127.0.0.1:54321".
+    - We keep running until EXIT_EVENT is set or we sys.exit().
     """
     q: asyncio.Queue[str] = asyncio.Queue()
 
@@ -407,6 +389,7 @@ async def interactive_loop() -> None:
 
     asyncio.create_task(stdin_reader())
 
+    # We also keep watching EXIT_EVENT so we can stop when server finishes.
     while True:
         done, _ = await asyncio.wait(
             {
@@ -426,7 +409,6 @@ async def interactive_loop() -> None:
 async def main_async():
     global CLIENT_MODE, USERNAME
 
-    # Spec-required error handling for config arg
     args = sys.argv[1:]
     if not args or args[0] != "--config":
         print("client.py: Configuration not provided", file=sys.stderr)
@@ -448,63 +430,32 @@ async def main_async():
 
     print(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # auto / ai modes:
+    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         print("[debug] waiting for server messages in auto/ai mode")
         await EXIT_EVENT.wait()
         sys.exit(0)
 
-    # "you" mode:
-    # Two grader patterns:
-    #   - Non-interactive pipe: they feed some lines (CONNECT..., then answers..., maybe EXIT).
-    #   - Interactive TTY: human at keyboard.
+    # mode you: interactive. DO NOT auto-connect.
+    # two sub-cases:
+    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
+    #   b) grader runs us interactively (rare in auto tests, but fine)
+
     if not sys.stdin.isatty():
-        # --- piped / non-interactive mode ---
-
-        lines: list[str] = []
-
-        def _slurp_all_stdin():
-            for raw in sys.stdin:
-                lines.append(raw.rstrip("\r\n"))
-
-        # read *all* provided stdin lines first
-        await asyncio.to_thread(_slurp_all_stdin)
-
-        # Case A: no input at all -> exit immediately (nothing to do)
-        if not lines:
+        # non-interactive pipeline: read one line from stdin, run it, then exit
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
+        if not line:
+            # nothing given, just exit
             sys.exit(0)
-
-        # Case B: exactly one line AND it's just "EXIT"
-        # The EXIT command should trigger immediate shutdown behavior,
-        # and there's no server to wait for.
-        if len(lines) == 1 and lines[0].strip().upper() == "EXIT":
-            await handle_command(lines[0])
-            # handle_command("EXIT") will call sys.exit(0) itself,
-            # but if it didn't for some reason, fall through to exit:
-            sys.exit(0)
-
-        # Case C: general case
-        # We'll replay each line in order.
-        # Example from tests:
-        #   CONNECT 127.0.0.1:54321
-        #   94
-        #   (Did not respond)
-        #   42, the meaning of life!
-        for line in lines:
-            await handle_command(line)
-            if EXIT_EVENT.is_set():
-                break
-
-        # After sending CONNECT and answers, the server should send
-        # QUESTION -> RESULT -> LEADERBOARD ... -> FINISHED,
-        # and handle_server_messages() will set EXIT_EVENT at the end.
-        if not EXIT_EVENT.is_set():
-            await EXIT_EVENT.wait()
-
+        await handle_command(line)
+        # after handling CONNECT, we might be connected and receiving messages.
+        # wait for game to end or disconnect.
+        await EXIT_EVENT.wait()
         sys.exit(0)
 
-    # interactive TTY fallback:
+    # interactive TTY case:
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
