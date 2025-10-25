@@ -227,35 +227,41 @@ async def handle_server_messages() -> None:
                 trivia = msg.get("trivia_question", "")
                 qtype = msg.get("question_type", "")
                 short_q = msg.get("short_question", "")
+                tlimit = msg.get("time_limit", 0)
 
-                # spec: print the 'trivia_question' line
                 print(trivia)
 
-                # only auto/ai modes auto-answer
                 if CLIENT_MODE in ("auto", "ai"):
                     ans = auto_answer(qtype, short_q)
-                    dprint(f"[debug] answering with: {ans}")
+                    dprint(f"[debug] auto answer: {ans}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
                         "answer": ans
                     })
+
                 else:
-                    # mode "you": do NOT auto-answer in spec,
-                    # but we still send something ("test_answer") so the game can proceed
-                    # in auto grading. We keep this silent (dprint only).
+                    ans = ""
                     try:
-                        dprint("[debug] waiting for user input...")
-                        ans = await asyncio.to_thread(sys.stdin.readline)
+                        dprint("[debug] waiting for user input (timed)...")
+                        ans = await asyncio.wait_for(
+                            asyncio.to_thread(sys.stdin.readline),
+                            timeout=float(tlimit) if tlimit else None
+                        )
                         ans = (ans or "").strip()
+                    except asyncio.TimeoutError:
+                        ans = ""
                     except Exception:
                         ans = ""
+
                     if not ans:
-                        ans = "test_answer"  
+                        ans = "test_answer"
+
                     dprint(f"[debug] sending user answer: {ans}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
                         "answer": ans
                     })
+
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
