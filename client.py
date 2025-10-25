@@ -205,7 +205,10 @@ async def handle_server_messages() -> None:
 
     try:
         while True:
-            msg = await read_line_json(reader)
+            try:
+                msg = await read_line_json(reader)
+            except ConnectionResetError:
+                break
             if msg is None:
                 dprint("[debug] server closed connection")
                 break
