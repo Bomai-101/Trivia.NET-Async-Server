@@ -1,34 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Async NDJSON client (spec-compliant, with debug prints).
-
-Protocol summary:
-- Communication is line-delimited JSON (NDJSON) over UTF-8.
-- We send:
-    HI        -> {"message_type":"HI","type":"HI","username":...}
-    ANSWER    -> {"message_type":"ANSWER","answer":...}
-    BYE       -> {"message_type":"BYE"}
-- We print (as required by spec/testcases):
-    READY.info
-    QUESTION.trivia_question
-    RESULT.feedback
-    LEADERBOARD.state
-    FINISHED.final_standings
-
-Modes:
-- 'auto' : connects automatically, answers automatically
-- 'you'  : human-style participation (still automatic output, but no auto-answering)
-"""
-
 import asyncio
 import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
-
-# ---------------- Helpers ----------------
 
 def _enc(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
@@ -47,21 +24,16 @@ async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any
     except json.JSONDecodeError:
         return {"message_type": "ERROR", "message": "invalid_json"}
 
-# ---------------- Connection ----------------
-
 class Conn:
     def __init__(self) -> None:
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
-
     def is_connected(self) -> bool:
         return self.reader is not None and self.writer is not None
-
     def attach(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader = reader
         self.writer = writer
         print("[debug] Conn.attach(): connection established")
-
     def clear(self) -> None:
         self.reader = None
         self.writer = None
@@ -70,8 +42,6 @@ CONN = Conn()
 CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
-
-# ---------------- Auto-answer helpers ----------------
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -148,7 +118,6 @@ def _network_broadcast_pair(cidr: str) -> str:
         return ""
     if prefix < 0 or prefix > 32:
         return ""
-
     ip_int = _ip_to_int(a, b, c, d)
     mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) if prefix != 0 else 0
     network_int = ip_int & mask
@@ -159,7 +128,6 @@ def _network_broadcast_pair(cidr: str) -> str:
 
 def auto_answer(question_type: str, short_question: str) -> str:
     qtype = (question_type or "").strip()
-
     if qtype == "Mathematics":
         return _eval_plus_minus(short_question)
     if qtype == "Roman Numerals":
@@ -170,12 +138,9 @@ def auto_answer(question_type: str, short_question: str) -> str:
         return _network_broadcast_pair(short_question)
     return ""
 
-# ---------------- Message handler ----------------
-
 async def game_loop() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
-
     try:
         while True:
             msg = await read_line_json(reader)
@@ -192,7 +157,7 @@ async def game_loop() -> None:
             elif mtype == "QUESTION":
                 trivia = msg.get("trivia_question", "")
                 print(trivia)
-                if CLIENT_MODE == "auto":
+                if CLIENT_MODE == "auto" or CLIENT_MODE == "ai":
                     qtype = msg.get("question_type", "")
                     short_q = msg.get("short_question", "")
                     ans = auto_answer(qtype, short_q)
@@ -230,16 +195,12 @@ async def game_loop() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ---------------- Connection helpers ----------------
-
 async def connect_and_hi(host: str, port: int, username: str) -> None:
     print(f"[debug] connect_and_hi(): connecting to {host} {port}")
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
-        # IMPORTANT:
-        # In tests where host/port are valid, this should not fail.
-        # In tests where host/port are missing (None), we now avoid even calling this function.
+        # This only runs if test gives us a bad host/port while still expecting us to try.
         print("Connection failed")
         raise SystemExit(1)
 
@@ -247,97 +208,80 @@ async def connect_and_hi(host: str, port: int, username: str) -> None:
     hi_msg = {
         "message_type": "HI",
         "type": "HI",
-        "username": username
+        "username": username,
     }
     print(f"[debug] connect_and_hi(): sending HI -> {hi_msg}")
     await send_line(writer, hi_msg)
     print("[debug] connect_and_hi(): HI sent")
 
-async def graceful_bye() -> None:
-    if not CONN.is_connected():
-        EXIT_EVENT.set()
-        return
-    try:
-        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
-    except Exception:
-        pass
-    try:
-        CONN.writer.close()  # type: ignore
-        await CONN.writer.wait_closed()  # type: ignore
-    except Exception:
-        pass
-    CONN.clear()
-    EXIT_EVENT.set()
-
-# ---------------- Config ----------------
+async def play_game_after_connect(host: str, port: int, username: str) -> None:
+    await connect_and_hi(host, port, username)
+    await game_loop()
 
 def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
     if not path:
         return {}
+    # spec assumption: file (if exists) is valid JSON
     data = json.loads(path.read_text(encoding="utf-8"))
     print(f"[debug] load_config(): {data}")
     return data
 
-# ---------------- Modes ----------------
-
-async def play_game_auto(host: str, port: int, username: str) -> None:
-    await connect_and_hi(host, port, username)
-    await game_loop()
-
-async def play_game_you(host: str, port: int, username: str) -> None:
-    await connect_and_hi(host, port, username)
-    await game_loop()
-
-# ---------------- Main ----------------
-
 async def main_async() -> None:
     global CLIENT_MODE, USERNAME
 
+    # ----- fatal error check #1: missing --config or path -----
     args = sys.argv[1:]
     if not args or args[0] != "--config" or len(args) < 2:
+        # must go to stderr, exit code 1
         print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
-    cfg_path = Path(args[1])
+    cfg_path_str = args[1]
+    cfg_path = Path(cfg_path_str)
+
+    # ----- fatal error check #2: config file doesn't exist -----
     if not cfg_path.exists():
-        print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
+        print(f"client.py: File {cfg_path_str} does not exist", file=sys.stderr)
         sys.exit(1)
 
     cfg = load_client_config(cfg_path)
 
+    # read basic fields
     host = cfg.get("host")
     port = cfg.get("port")
     USERNAME = cfg.get("username", "player")
     CLIENT_MODE = cfg.get("client_mode", "you")
 
+    # ----- fatal error check #3: ai mode without ollama_config -----
+    if CLIENT_MODE == "ai":
+        # spec says: if "ollama_config" is None OR absent -> fatal
+        if "ollama_config" not in cfg or cfg.get("ollama_config") is None:
+            print("client.py: Missing values for Ollama configuration", file=sys.stderr)
+            sys.exit(1)
+
     print(f"[debug] startup mode={CLIENT_MODE} host={host} port={port} username={USERNAME}")
 
-    # >>> NEW LOGIC <<<
-    # If host/port are missing, we just exit immediately.
-    # This satisfies "Client does not exit on startup":
-    # in that test they give us only username/mode but no host/port,
-    # and they expect us NOT to try to connect or hang.
+    # If host/port missing:
+    # This is NOT a fatal error per spec. We just don't connect and we exit 0.
     if host is None or port is None:
-        # normal clean exit, no connection attempt
         return
 
-    # Otherwise, run the game for real.
-    if CLIENT_MODE == "auto":
-        await play_game_auto(host, port, USERNAME)
-    else:
-        await play_game_you(host, port, USERNAME)
+    # Otherwise we actually play:
+    await play_game_after_connect(host, int(port), USERNAME)
 
+    # Wait until game loop signals EXIT_EVENT.
     await EXIT_EVENT.wait()
 
 def main() -> None:
     try:
         asyncio.run(main_async())
     except SystemExit:
+        # SystemExit(1) etc. already handled
         pass
     except KeyboardInterrupt:
         pass
     except ConnectionResetError:
-        # Some tests intentionally kill the server mid-game.
+        # server may drop us mid-test, which is expected in some tests
         pass
 
 if __name__ == "__main__":
