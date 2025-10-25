@@ -439,7 +439,14 @@ async def coordinator() -> None:
 
         for p in players_snapshot:
             name = p["name"]
-            ans = CURRENT_ANSWERS.get(name, "").strip()
+            raw_ans = CURRENT_ANSWERS.get(name, None)
+
+            # Did this player actually send an ANSWER message?
+            if raw_ans is None:
+                # player gave no answer at all -> skip sending RESULT to them
+                continue
+
+            ans = raw_ans.strip()
 
             if correct_full is None:
                 ok = False
@@ -462,6 +469,7 @@ async def coordinator() -> None:
                 "correct": bool(ok),
                 "feedback": feedback
             })
+
 
         # Branch: non-final question vs final  question
         if i < total_questions:
