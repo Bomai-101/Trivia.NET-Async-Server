@@ -457,29 +457,54 @@ async def main_async():
 
     # "you" mode:
     # Two grader patterns:
-    #   - Non-interactive pipe: they feed multiple lines (CONNECT..., then answers...).
-    #   - Interactive style: they attach tty and send commands manually.
+    #   - Non-interactive pipe: they feed some lines (CONNECT..., then answers..., maybe EXIT).
+    #   - Interactive TTY: human at keyboard.
     if not sys.stdin.isatty():
-        # Non-interactive pipeline.
+        # --- piped / non-interactive mode ---
+
         lines: list[str] = []
 
         def _slurp_all_stdin():
             for raw in sys.stdin:
                 lines.append(raw.rstrip("\r\n"))
 
+        # read *all* provided stdin lines first
         await asyncio.to_thread(_slurp_all_stdin)
 
+        # Case A: no input at all -> exit immediately (nothing to do)
+        if not lines:
+            sys.exit(0)
+
+        # Case B: exactly one line AND it's just "EXIT"
+        # The EXIT command should trigger immediate shutdown behavior,
+        # and there's no server to wait for.
+        if len(lines) == 1 and lines[0].strip().upper() == "EXIT":
+            await handle_command(lines[0])
+            # handle_command("EXIT") will call sys.exit(0) itself,
+            # but if it didn't for some reason, fall through to exit:
+            sys.exit(0)
+
+        # Case C: general case
+        # We'll replay each line in order.
+        # Example from tests:
+        #   CONNECT 127.0.0.1:54321
+        #   94
+        #   (Did not respond)
+        #   42, the meaning of life!
         for line in lines:
             await handle_command(line)
             if EXIT_EVENT.is_set():
                 break
 
+        # After sending CONNECT and answers, the server should send
+        # QUESTION -> RESULT -> LEADERBOARD ... -> FINISHED,
+        # and handle_server_messages() will set EXIT_EVENT at the end.
         if not EXIT_EVENT.is_set():
             await EXIT_EVENT.wait()
 
         sys.exit(0)
 
-    # Interactive TTY fallback
+    # interactive TTY fallback:
     print("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
