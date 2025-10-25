@@ -279,7 +279,7 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ----------------- commands -------------------
+# ----------------- commands --------------------
 
 async def cmd_connect(host: str, port: int) -> None:
     # connect to server and immediately send HI
