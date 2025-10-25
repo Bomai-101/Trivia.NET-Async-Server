@@ -232,6 +232,7 @@ async def handle_server_messages() -> None:
                     # mode "you": do NOT auto-answer.
                     # the human / grader may send ANSWER separately,
                     # or maybe they won't, doesn't matter.
+                    print(f"[debug] answering with: {"test_ans"}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
                         "answer": "test_answer"
