@@ -261,7 +261,7 @@ async def handle_server_messages() -> None:
                         ans = None
 
                     dprint(f"[debug] b4 sending answer: {raw}")
-                    print(f"[debug] b4 sending answer: {raw}")
+                    #print(f"[debug] b4 sending answer: {raw}")
                     if ans is not None and ans != "":
                         dprint(f"[debug] sending user answer: {ans}")
                         await send_line(writer, {
