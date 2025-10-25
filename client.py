@@ -368,7 +368,7 @@ async def main_async() -> int:
         if data.upper().startswith("EXIT"):
             return 0
         # Some tests might pipe commands like CONNECT ... or so,
-        # but for this trimmed version we just ignore interactive mode.
+        # but for this trimmed version we just ignore  interactive mode.
 
     code = await run_client()
     return code
