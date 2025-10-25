@@ -31,6 +31,14 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Literal
 
+# ----------------- debug toggle -----------------
+
+DEBUG = False  # set False to silence debug output
+
+def dprint(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
+
 # ----------------- utility encode/decode -----------------
 
 def _enc(obj: Dict[str, Any]) -> bytes:
@@ -199,11 +207,11 @@ async def handle_server_messages() -> None:
         while True:
             msg = await read_line_json(reader)
             if msg is None:
-                print("[debug] server closed connection")
+                dprint("[debug] server closed connection")
                 break
 
             # debug dump (extra output is allowed)
-            print(f"[debug] received: {msg}")
+            dprint(f"[debug] received: {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
@@ -223,7 +231,7 @@ async def handle_server_messages() -> None:
                 # only auto/ai modes auto-answer
                 if CLIENT_MODE in ("auto", "ai"):
                     ans = auto_answer(qtype, short_q)
-                    print(f"[debug] answering with: {ans}")
+                    dprint(f"[debug] answering with: {ans}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
                         "answer": ans
@@ -232,7 +240,7 @@ async def handle_server_messages() -> None:
                     # mode "you": do NOT auto-answer.
                     # the human / grader may send ANSWER separately,
                     # or maybe they won't, doesn't matter.
-                    print(f"[debug] answering with: {"test_ans"}")
+                    dprint(f"[debug] answering with: {"test_ans"}")
                     await send_line(writer, {
                         "message_type": "ANSWER",
                         "answer": "test_answer"
@@ -255,7 +263,7 @@ async def handle_server_messages() -> None:
                 print(f"[server] ERROR {msg.get('message')}")
 
             else:
-                print(f"[debug] unknown message_type {mtype} / full={msg}")
+                dprint(f"[debug] unknown message_type {mtype} / full={msg}")
 
     finally:
         # close connection, flag exit
@@ -273,7 +281,7 @@ async def handle_server_messages() -> None:
 async def cmd_connect(host: str, port: int) -> None:
     # connect to server and immediately send HI
     if CONN.is_connected():
-        print("[debug] already connected (cmd_connect ignored)")
+        dprint("[debug] already connected (cmd_connect ignored)")
         return
     try:
         reader, writer = await asyncio.open_connection(host, port)
@@ -290,16 +298,16 @@ async def cmd_connect(host: str, port: int) -> None:
         "message_type": "HI",
         "username": USERNAME
     }
-    print(f"[debug] sending HI: {hi_msg}")
+    dprint(f"[debug] sending HI: {hi_msg}")
     await send_line(writer, hi_msg)
-    print("[debug] HI sent")
+    dprint("[debug] HI sent")
 
     # begin reading server messages in background
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
     if not CONN.is_connected():
-        print("[debug] not connected (cmd_disconnect ignored)")
+        dprint("[debug] not connected (cmd_disconnect ignored)")
         return
     try:
         await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
@@ -354,7 +362,7 @@ async def handle_command(line: str) -> None:
         return
 
     # unknown
-    print(f"[debug] unknown command from stdin: {cmd}")
+    dprint(f"[debug] unknown command from stdin: {cmd}")
 
 # ----------------- config and main -----------------
 
@@ -432,12 +440,12 @@ async def main_async():
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
 
-    print(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
     # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
-        print("[debug] waiting for server messages in auto/ai mode")
+        dprint("[debug] waiting for server messages in auto/ai mode")
         await EXIT_EVENT.wait()
         sys.exit(0)
 
