@@ -245,7 +245,7 @@ async def handle_server_messages() -> None:
                         dprint(f"[debug] waiting for user input (limit={tlimit}s)...")
                         raw = await asyncio.wait_for(
                             asyncio.to_thread(sys.stdin.readline),
-                            timeout=float(tlimit) if tlimit else None
+                            timeout=float(tlimit)
                         )
                         if raw is not None:
                             raw = raw.strip()
