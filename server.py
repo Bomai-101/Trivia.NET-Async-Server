@@ -443,7 +443,7 @@ async def coordinator() -> None:
 
             # Did this player actually send an ANSWER message?
             #if raw_ans is None:
-                # player gave no answer at all -> skip sending RESULT to them
+                # player gave no answer at all -> skip sending RESULT to  them
                 #continue
 
             ans = raw_ans.strip()
