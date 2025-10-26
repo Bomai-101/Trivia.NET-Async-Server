@@ -312,7 +312,7 @@ async def cmd_connect(host: str, port: int) -> None:
         return
 
     # retry logic to handle race where server isn't ready yet
-    for _ in range(5):
+    for _ in range(20):
         try:
             reader, writer = await asyncio.open_connection(host, port)
             break
@@ -452,7 +452,7 @@ async def main_async():
 
     # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
         await cmd_connect(DEFAULT_HOST, DEFAULT_PORT)
         dprint("[debug] waiting for server messages in auto/ai mode")
 
