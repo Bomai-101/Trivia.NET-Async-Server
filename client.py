@@ -75,7 +75,7 @@ CONN = Conn()
 
 # ----------------- globals -----------------
 
-CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
+CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
 
