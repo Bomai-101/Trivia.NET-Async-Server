@@ -374,7 +374,7 @@ async def coordinator() -> None:
 
     qtypes = CFG.get("question_types", []) or []
     question_word = CFG.get("question_word", "Question")
-    qsec = CFG.get("question_seconds", 5)
+    qsec = CFG.get("question_seconds")
     qgap = CFG.get("question_interval_seconds", 0)
 
     ready_info_tpl = CFG.get("ready_info", "Game starts soon!")
