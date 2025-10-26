@@ -407,7 +407,7 @@ def load_client_config(path: Path) -> Dict[str, Any]:
             sys.exit(1)
         return cfg
     except Exception:
-        print(f"[client] failed to load config: {e}", file=sys.stderr)
+        print(f"[client] failed to load config: {Exception}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -448,12 +448,12 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={DEFAULT_HOST} port={DEFAULT_PORT} username={USERNAME}")
 
     # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
         await asyncio.sleep(0.2)
-        await cmd_connect(default_host, default_port)
+        await cmd_connect(DEFAULT_HOST, DEFAULT_PORT)
         dprint("[debug] waiting for server messages in auto/ai mode")
 
         # NEW: add timeout so we don't hang forever if server never finishes
