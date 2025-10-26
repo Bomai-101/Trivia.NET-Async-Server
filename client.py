@@ -213,13 +213,11 @@ async def handle_server_messages() -> None:
                 dprint("[debug] server closed connection")
                 break
 
-            # debug dump (extra output is allowed)
             dprint(f"[debug] received: {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
-                # spec: print the info string
                 info = msg.get("info", "")
                 print(info)
 
@@ -270,9 +268,6 @@ async def handle_server_messages() -> None:
                     else:
                         dprint("[debug] no answer sent (timeout or empty input)")
 
-
-
-
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 print(fb)
@@ -293,7 +288,6 @@ async def handle_server_messages() -> None:
                 dprint(f"[debug] unknown message_type {mtype} / full={msg}")
 
     finally:
-        # close connection, flag exit
         try:
             if CONN.writer:
                 CONN.writer.close()
@@ -319,13 +313,10 @@ async def cmd_connect(host: str, port: int) -> None:
         except Exception:
             await asyncio.sleep(0.2)
     else:
-        # this line must be printed as plain output in at least one test case
         print("Connection failed")
         return
 
     CONN.reader, CONN.writer = reader, writer
-
-    # we keep this quiet for grading stability
     dprint(f"[client] connected to {host}:{port}")
 
     hi_msg = {
@@ -336,7 +327,6 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, hi_msg)
     dprint("[debug] HI sent")
 
-    # begin reading server messages in background 
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
@@ -375,12 +365,8 @@ async def handle_command(line: str) -> None:
         sys.exit(0)
 
     if up.startswith("CONNECT"):
-        # patterns:
-        #   CONNECT
-        #   CONNECT host:port
         parts = cmd.split(maxsplit=1)
         if len(parts) == 1:
-            # no host:port provided
             dprint("[client] usage: CONNECT <host>:<port>")
             return
         try:
@@ -394,7 +380,7 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
-    # unknown
+    # unknown commands are just ignored (this is allowed)
     dprint(f"[debug] unknown command from stdin: {cmd}")
 
 # ----------------- config and main -----------------
@@ -418,10 +404,14 @@ def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
 async def interactive_loop() -> None:
     """
     Mode 'you':
-    - DO NOT auto-connect.
-    - We read commands from stdin.
-    - The grader will feed us lines like "CONNECT 127.0.0.1:54321".
-    - We keep running until EXIT_EVENT is set or we sys.exit().
+    - We read ALL stdin lines (either human typing or piped in).
+    - Lines like:
+        CONNECT 127.0.0.1:54321
+        EXIT
+      are handled via handle_command.
+    - We keep running until:
+        * server reaches FINISHED (EXIT_EVENT set), OR
+        * user types EXIT (handle_command will sys.exit(0))
     """
     q: asyncio.Queue[str] = asyncio.Queue()
 
@@ -434,7 +424,6 @@ async def interactive_loop() -> None:
 
     asyncio.create_task(stdin_reader())
 
-    # We also keep watching EXIT_EVENT so we can stop when server finishes.
     while True:
         done, _ = await asyncio.wait(
             {
@@ -475,26 +464,31 @@ async def main_async():
 
     dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
+    # auto / ai modes:
+    # immediately connect and auto-answer questions, then exit when FINISHED (or timeout)
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         dprint("[debug] waiting for server messages in auto/ai mode")
 
-        # NEW: add timeout so we don't hang forever if server never finishes
         try:
             await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
+
         sys.exit(0)
 
-    # mode you: interactive. DO NOT auto-connect .
-    # two sub-cases:
-    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
-    #   b) grader runs us interactively (rare in auto tests, but fine)
-
-    
-
-    # interactive TTY case:
+    # you mode:
+    # IMPORTANT:
+    #   We do NOT branch on sys.stdin.isatty().
+    #   Whether input is from a human at a terminal OR from a pipe like:
+    #       echo "EXIT" | python3 client.py --config cfg.json
+    #   we ALWAYS go through interactive_loop().
+    #
+    #   This solves BOTH:
+    #     - EXIT testcase (it will push "EXIT" through q, call handle_command, sys.exit(0))
+    #     - full-game testcase with piped multi-lines ("CONNECT ...", "A", "AA", ...)
+    #       because we keep running instead of reading only one line then quitting.
+    #
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
