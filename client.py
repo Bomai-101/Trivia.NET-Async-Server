@@ -448,27 +448,6 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    global CLIENT_MODE, USERNAME
-
-    args = sys.argv[1:]
-    if not args or args[0] != "--config":
-        print("client.py: Configuration not provided", file=sys.stderr)
-        sys.exit(1)
-    if len(args) < 2:
-        print("client.py: Configuration not provided", file=sys.stderr)
-        sys.exit(1)
-
-    cfg_path = Path(args[1])
-    if not cfg_path.exists():
-        print(f"client.py: File {cfg_path} does not exist", file=sys.stderr)
-        sys.exit(1)
-
-    cfg = load_client_config(cfg_path)
-    CLIENT_MODE = cfg.get("client_mode")
-    USERNAME = cfg.get("username", "player")
-    default_host = cfg.get("host", "127.0.0.1")
-    default_port = int(cfg.get("port", 5050))
-
     dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
     # mode auto/ai: we are allowed to auto-connect immediately to config host/port
@@ -514,12 +493,36 @@ async def main_async():
     sys.exit(0)
 
 def main():
+    args = sys.argv[1:]
+    if not args or args[0] != "--config" or len(args) < 2:
+        print("client.py: Configuration not provided", file=sys.stderr)
+        sys.exit(1)
+
+    cfg_path = Path(args[1])
+    if not cfg_path.exists():
+        print("client.py: Configuration not provided", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = load_client_config(cfg_path)
+
+    mode_from_cfg = cfg.get("client_mode")
+    if mode_from_cfg not in ("you", "auto", "ai"):
+        print("client.py: Configuration not provided", file=sys.stderr)
+        sys.exit(1)
+
+    global CLIENT_MODE, USERNAME, DEFAULT_HOST, DEFAULT_PORT
+    CLIENT_MODE = mode_from_cfg
+    USERNAME = cfg.get("username", "player")
+    DEFAULT_HOST = cfg.get("host", "127.0.0.1")
+    DEFAULT_PORT = int(cfg.get("port", 5050))
+
     try:
         asyncio.run(main_async())
     except SystemExit:
         pass
     except KeyboardInterrupt:
         pass
+
 
 if __name__ == "__main__":
     main()
