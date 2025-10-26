@@ -441,19 +441,18 @@ async def coordinator() -> None:
             name = p["name"]
             raw_ans = CURRENT_ANSWERS.get(name, None)
 
-            # Did this player actually send an ANSWER message?
-            if raw_ans is None:
-                # player gave no answer at all -> skip sending RESULT to  them
-                continue
+            # if they never answered, treat answer as ""
+            answered = (raw_ans is not None)
+            ans = (raw_ans.strip() if answered else "")
 
-            ans = raw_ans.strip()
+            correct_full = compute_correct_answer(qtype, short_q)
 
             if correct_full is None:
                 ok = False
                 correct_str = "N/A"
             else:
                 correct_str = correct_full
-                ok = (ans == correct_full)
+                ok = (answered and ans == correct_full)
 
             if ok:
                 p["score"] += 1
