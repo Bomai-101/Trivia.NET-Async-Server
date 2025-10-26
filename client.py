@@ -464,7 +464,7 @@ async def main_async():
         sys.exit(1)
 
     cfg = load_client_config(cfg_path)
-    CLIENT_MODE = cfg.get("client_mode", "you")
+    CLIENT_MODE = cfg.get("client_mode")
     USERNAME = cfg.get("username", "player")
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
