@@ -492,24 +492,7 @@ async def main_async():
     #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
     #   b) grader runs us interactively (rare in auto tests, but fine)
 
-    if not sys.stdin.isatty():
-        # non-interactive pipeline: read one line from stdin, run it, then exit
-        line = await asyncio.to_thread(sys.stdin.readline)
-        line = (line or "").strip()
-        if not line:
-            sys.exit(0)
-
-        await handle_command(line)
-
-        # after handling CONNECT, we might be connected and receiving messages.
-        # wait for game to end or disconnect.
-        # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
-        try:
-            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
-
-        sys.exit(0)
+    
 
     # interactive TTY case:
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
