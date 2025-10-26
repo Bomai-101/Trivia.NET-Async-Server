@@ -475,44 +475,58 @@ async def main_async():
 
     dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
+    # ----------------------------
+    # auto / ai mode (unchanged)
+    # ----------------------------
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         dprint("[debug] waiting for server messages in auto/ai mode")
-
-        # NEW: add timeout so we don't hang forever if server never finishes
         try:
             await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
         sys.exit(0)
 
-    # mode you: interactive. DO NOT auto-connect .
-    # two sub-cases:
-    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
-    #   b) grader runs us interactively (rare in auto tests, but fine)
-
+    # ----------------------------
+    # you mode
+    # ----------------------------
     if not sys.stdin.isatty():
-        # non-interactive pipeline: read one line from stdin, run it, then exit
-        line = await asyncio.to_thread(sys.stdin.readline)
-        line = (line or "").strip()
-        if not line:
-            print(f"whaaaat received {line}")
+        # PIPED / NON-INTERACTIVE MODE
+        # grader might do:
+        #   echo "EXIT" | python3 client.py --config cfg.json
+        # or:
+        #   echo -e "CONNECT host:port\nA\nAA\n" | python3 client.py --config cfg.json
+        #
+        # OLD behavior: read one line then wait 5s then exit  -> caused bug2.
+        # NEW behavior:
+        #   1. read FIRST line
+        #   2. run handle_command() on it
+        #       - if it's EXIT, handle_command() will sys.exit(0) immediately (good for EXIT testcase)
+        #       - if it's CONNECT, we connect and start server listener
+        #   3. THEN fall through into interactive_loop() so we keep consuming
+        #      the remaining stdin lines (answers like "A", "AA", etc.)
+        #
+        first_line = await asyncio.to_thread(sys.stdin.readline)
+        first_line = (first_line or "").strip()
+
+        if first_line:
+            await handle_command(first_line)
+        else:
+            # nothing provided at all -> just exit quietly
             sys.exit(0)
-        print(f"what received {line}")
-        await handle_command(line)
 
-        # after handling CONNECT, we might be connected and receiving messages.
-        # wait for game to end or disconnect.
-        # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
-        try:
-            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
-
+        # IMPORTANT:
+        # DO NOT sys.exit here.
+        # Instead, continue like TTY mode: run interactive_loop()
+        # so that:
+        #   - subsequent piped lines ("A", "AA", etc.) still get consumed
+        #   - handle_server_messages() can ask for answers per-question
+        #
+        dprint("[client] (non-tty) entering interactive_loop() after first line")
+        await interactive_loop()
         sys.exit(0)
 
-    # interactive TTY case:
+    # INTERACTIVE TTY MODE (user typing live)
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
