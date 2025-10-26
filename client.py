@@ -516,9 +516,9 @@ def main():
     USERNAME = cfg.get("username", "player")
     DEFAULT_HOST = cfg.get("host", "127.0.0.1")
     DEFAULT_PORT = int(cfg.get("port", 5050))
-    print(USERNAME)
-    print(DEFAULT_HOST)
-    print(DEFAULT_PORT)
+    dprint(USERNAME)
+    dprint(DEFAULT_HOST)
+    dprint(DEFAULT_PORT)
 
     try:
         asyncio.run(main_async())
