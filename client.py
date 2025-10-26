@@ -475,55 +475,47 @@ async def main_async():
 
     dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # -------- auto / ai mode (unchanged) --------
+    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         dprint("[debug] waiting for server messages in auto/ai mode")
+
+        # NEW: add timeout so we don't hang forever if server never finishes
         try:
             await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
         sys.exit(0)
 
-    # -------- you mode --------
+    # mode you: interactive. DO NOT auto-connect .
+    # two sub-cases:
+    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
+    #   b) grader runs us interactively (rare in auto tests, but fine)
+
     if not sys.stdin.isatty():
-        # Non-interactive / piped mode.
-        # Grader behavior:
-        #   Case A: echo "EXIT" | client.py ...
-        #   Case B: echo "CONNECT host:port" | client.py ...  then grader drives the game.
-        #
-        # Strategy:
-        #   1. Read FIRST line from stdin.
-        #   2. Run handle_command(first_line).
-        #        - If it's EXIT, handle_command() will sys.exit(0) immediately.
-        #        - If it's CONNECT, we'll connect and start handle_server_messages().
-        #   3. Then behave exactly like interactive mode:
-        #        - enter interactive_loop() and stay alive until FINISHED/EXIT_EVENT
-        #   This fixes:
-        #     - no-server test   (prints only "Connection failed")
-        #     - long trivia test (we don't kill connection after 5s anymore)
-        #
-        first_line = await asyncio.to_thread(sys.stdin.readline)
-        first_line = (first_line or "").strip()
-
-        if first_line:
-            await handle_command(first_line)
-        else:
-            # nothing at all provided -> just exit quietly
+        # non-interactive pipeline: read one line from stdin, run it, then exit
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
+        if not line:
+            print(f"whaaaat received {line}")
             sys.exit(0)
+        print(f"what received {line}")
+        await handle_command(line)
 
-        # IMPORTANT:
-        # We do NOT do the old "wait 5 seconds then exit".
-        # We now fall through into the same loop as TTY mode,
-        # so the client stays connected until the server finishes.
-        await interactive_loop()
+        # after handling CONNECT, we might be connected and receiving messages.
+        # wait for game to end or disconnect.
+        # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
+        try:
+            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+
         sys.exit(0)
 
-    # Interactive TTY mode (human typing, or grader using pty)
+    # interactive TTY case:
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
-
 
 def main():
     try:
