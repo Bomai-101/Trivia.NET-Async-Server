@@ -450,19 +450,6 @@ async def interactive_loop() -> None:
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={DEFAULT_HOST} port={DEFAULT_PORT} username={USERNAME}")
 
-    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
-    if CLIENT_MODE in ("auto", "ai"):
-        await asyncio.sleep(0.25)
-        await cmd_connect(DEFAULT_HOST, DEFAULT_PORT)
-        dprint("[debug] waiting for server messages in auto/ai mode")
-
-        # NEW: add timeout so we don't hang forever if server never finishes
-        try:
-            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
-        sys.exit(0)
-
     # mode you: interactive. DO NOT auto-connect .
     # two sub-cases:
     #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
