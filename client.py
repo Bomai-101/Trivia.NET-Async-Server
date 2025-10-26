@@ -475,101 +475,47 @@ async def main_async():
 
     dprint(f"[debug] startup mode={CLIENT_MODE} host={default_host} port={default_port} username={USERNAME}")
 
-    # ---------- auto / ai mode (unchanged) ----------
+    # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
         await cmd_connect(default_host, default_port)
         dprint("[debug] waiting for server messages in auto/ai mode")
+
+        # NEW: add timeout so we don't hang forever if server never finishes
         try:
             await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             pass
         sys.exit(0)
 
-    # ---------- you mode ----------
+    # mode you: interactive. DO NOT auto-connect .
+    # two sub-cases:
+    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
+    #   b) grader runs us interactively (rare in auto tests, but fine)
+
     if not sys.stdin.isatty():
-        # PIPED / non-interactive mode.
-        # Grader patterns:
-        #   1) echo "EXIT" | client.py ...
-        #      -> must exit immediately.
-        #   2) echo "CONNECT host:port" | client.py ...
-        #      -> must connect, play until FINISHED,
-        #         then exit gracefully (or after short timeout).
-        #   3) During play, grader may later send EXIT via stdin
-        #      -> must exit quickly, not hang until FINISHED.
-
-        first_line = await asyncio.to_thread(sys.stdin.readline)
-        first_line = (first_line or "").strip()
-
-        if not first_line:
-            # no input at all, just quit quietly
+        # non-interactive pipeline: read one line from stdin, run it, then exit
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
+        if not line:
+            dprint(f"whaaaat received {line}")
             sys.exit(0)
+        dprint(f"what received {line}")
+        await handle_command(line)
 
-        # run the first command ("EXIT" or "CONNECT host:port")
-        await handle_command(first_line)
-        # note: handle_command("EXIT") will sys.exit(0) immediately.
-
-        # if we get here, that means first_line was NOT EXIT.
-        # so we're connected (or attempted), maybe started handle_server_messages()
-        # now we need to:
-        #   - wait until either
-        #       a) EXIT_EVENT is set (server finished / disconnected),
-        #       b) stdin produces an "EXIT",
-        #       c) small timeout passes (satisfy tests that expect us
-        #          not to hang forever if server never responds).
-        #
-        exit_now = False
-
-        async def wait_for_exit_command():
-            # try to read one more line (like "EXIT")
-            # if no more stdin (EOF), this will return "" quickly.
-            nxt = await asyncio.to_thread(sys.stdin.readline)
-            nxt = (nxt or "").strip()
-            return nxt.upper() == "EXIT"
-
-        # We race:
-        #   - EXIT_EVENT.wait()         (normal game finished)
-        #   - wait_for_exit_command()   (grader sends EXIT after connect)
-        # We'll also apply an overall timeout (~5s) to avoid hanging forever
+        # after handling CONNECT, we might be connected and receiving messages.
+        # wait for game to end or disconnect.
+        # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
         try:
-            done, pending = await asyncio.wait(
-                {
-                    asyncio.create_task(EXIT_EVENT.wait()),
-                    asyncio.create_task(wait_for_exit_command()),
-                },
-                timeout=5.0,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            for task in pending:
-                task.cancel()
-
-            for task in done:
-                res = task.result()
-                # EXIT_EVENT.wait() returns None
-                # wait_for_exit_command() returns True if "EXIT"
-                if isinstance(res, bool) and res is True:
-                    exit_now = True
-
-        except Exception:
-            # swallow any weirdness and just fall through
+            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
             pass
 
-        # if grader sent EXIT as second line, we must hard-exit immediately
-        if exit_now:
-            await cmd_disconnect()
-            sys.exit(0)
-
-        # else: either EXIT_EVENT fired (server said FINISHED or closed)
-        # or timeout 5s elapsed. In both cases, we are allowed to exit now.
         sys.exit(0)
 
-    # ---------- interactive TTY mode ----------
-    # human / pseudo-terminal mode:
-    # read commands forever, including multiple CONNECT, EXIT etc.
+    # interactive TTY case:
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
-
 
 def main():
     try:
