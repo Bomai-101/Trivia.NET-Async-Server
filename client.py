@@ -452,7 +452,7 @@ async def main_async():
 
     # mode auto/ai: we are allowed to auto-connect immediately to config host/port
     if CLIENT_MODE in ("auto", "ai"):
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.25)
         await cmd_connect(DEFAULT_HOST, DEFAULT_PORT)
         dprint("[debug] waiting for server messages in auto/ai mode")
 
