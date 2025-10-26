@@ -497,9 +497,9 @@ async def main_async():
         line = await asyncio.to_thread(sys.stdin.readline)
         line = (line or "").strip()
         if not line:
-            print(f"whaaaat received {line}")
+            dprint(f"whaaaat received {line}")
             sys.exit(0)
-        print(f"what received {line}")
+        dprint(f"what received {line}")
         await handle_command(line)
 
         # after handling CONNECT, we might be connected and receiving messages.
