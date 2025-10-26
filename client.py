@@ -517,8 +517,8 @@ def main():
     DEFAULT_HOST = cfg.get("host", "127.0.0.1")
     DEFAULT_PORT = int(cfg.get("port", 5050))
     dprint(USERNAME)
-    dprint(DEFAULT_HOST)
-    dprint(DEFAULT_PORT)
+    print(cfg.get("host"))
+    print(cfg.get("port"))
 
     try:
         asyncio.run(main_async())
