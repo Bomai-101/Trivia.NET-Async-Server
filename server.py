@@ -441,11 +441,8 @@ async def coordinator() -> None:
             name = p["name"]
             raw_ans = CURRENT_ANSWERS.get(name, None)
 
-            # if they never answered, treat answer as ""
             answered = (raw_ans is not None)
-            ans = (raw_ans.strip() if answered else "")
-
-            correct_full = compute_correct_answer(qtype, short_q)
+            ans = raw_ans.strip() if answered else ""
 
             if correct_full is None:
                 ok = False
@@ -463,11 +460,20 @@ async def coordinator() -> None:
                 correct_str
             )
 
+            # NEW RULE:
+            # - If player didn't answer AND it's NOT the last question,
+            #   then DON'T send RESULT to them.
+            # - Otherwise (answered OR last question), send RESULT.
+            if (not answered) and (i < total_questions):
+                # skip sending RESULT for unanswered, non-final question
+                continue
+
             await send_line(p["w"], {
                 "message_type": "RESULT",
                 "correct": bool(ok),
                 "feedback": feedback
             })
+
 
 
         # Branch: non-final question vs final  question
