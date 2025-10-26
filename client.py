@@ -312,7 +312,7 @@ async def cmd_connect(host: str, port: int) -> None:
         return
 
     # retry logic to handle race where server isn't ready yet
-    for _ in range(20):
+    for _ in range(10):
         try:
             reader, writer = await asyncio.open_connection(host, port)
             break
