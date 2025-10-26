@@ -492,7 +492,7 @@ def main():
         sys.exit(1)
 
     cfg = load_client_config(cfg_path)
-    print(cfg)
+    dprint(cfg)
 
     mode_from_cfg = cfg.get("client_mode")
     if mode_from_cfg not in ("you", "auto", "ai"):
