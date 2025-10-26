@@ -75,7 +75,7 @@ CONN = Conn()
 
 # ----------------- globals -----------------
 
-CLIENT_MODE: Literal["you", "auto", "ai"] = "you"
+CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
 
@@ -399,21 +399,17 @@ async def handle_command(line: str) -> None:
 
 # ----------------- config and main -----------------
 
-def load_client_config(path: Optional[Path]) -> Dict[str, Any]:
-    defaults = {
-        "host": "127.0.0.1",
-        "port": 5050,
-        "client_mode": "you",
-        "username": "player"
-    }
-    if not path:
-        return defaults
+def load_client_config(path: Path) -> Dict[str, Any]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        defaults.update(data or {})
-    except Exception as e:
-        print(f"[client] failed to load config: {e}", file=sys.stderr)
-    return defaults
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        if "client_mode" not in cfg:
+            print("client.py: Missing client_mode in configuration", file=sys.stderr)
+            sys.exit(1)
+        return cfg
+    except Exception:
+        print(f"client.py: Failed to load {path}", file=sys.stderr)
+        sys.exit(1)
+
 
 async def interactive_loop() -> None:
     """
@@ -468,7 +464,7 @@ async def main_async():
         sys.exit(1)
 
     cfg = load_client_config(cfg_path)
-    CLIENT_MODE = cfg.get("client_mode", "you")
+    CLIENT_MODE = cfg.get("client_mode")
     USERNAME = cfg.get("username", "player")
     default_host = cfg.get("host", "127.0.0.1")
     default_port = int(cfg.get("port", 5050))
