@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 
 # ----------------- debug toggle -----------------
 
-DEBUG = True  # set True locally if you want verbose prints
+DEBUG = False  # set True locally if you want verbose prints
 
 def dprint(*args, **kwargs):
     if DEBUG:
@@ -408,7 +408,7 @@ async def handle_server_messages() -> None:
                         # spec: if no answer within time_limit,
                         # just don't send an ANSWER;
                         # we can still print a local line (the grader expects it)
-                        print("Error 404: Answer not found")
+                        dprint("Error 404: Answer not found")
                         dprint("[debug no ANSWER sent for this question]")
 
                 elif CLIENT_MODE == "auto":
