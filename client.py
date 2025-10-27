@@ -426,7 +426,7 @@ async def handle_server_messages() -> None:
 
             elif mtype == "RESULT":
                 # dump full RESULT to stderr for inspection
-                print(f"[debug RESULT] {msg}")
+                dprint(f"[debug RESULT] {msg}")
                 fb = msg.get("feedback", "")
                 if fb != "":
                     print(fb)
