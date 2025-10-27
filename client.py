@@ -342,6 +342,7 @@ async def handle_server_messages() -> None:
 
             # debug dump (extra output is allowed)
             dprint(f"[debug] received: {msg}")
+            print(f"[debug rx] {msg}", file=sys.stderr)
 
             mtype = str(msg.get("message_type", "")).upper()
 
@@ -359,7 +360,6 @@ async def handle_server_messages() -> None:
                 print(trivia)
 
                 if CLIENT_MODE == "ai":
-                    # ask LLM with timeout = tlimit
                     try:
                         ai_ans = await asyncio.wait_for(
                             ask_ollama(short_q, qtype, tlimit),
@@ -367,13 +367,18 @@ async def handle_server_messages() -> None:
                         )
                     except asyncio.TimeoutError:
                         ai_ans = ""
+                        print(f"[debug ai timeout] wait_for timed out after {tlimit}s", file=sys.stderr)
 
-                    dprint(f"ai_ans:{ai_ans}")
+                    print(f"[debug ai_ans before send] {ai_ans!r}", file=sys.stderr)
+
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ai_ans
                         })
+                        print(f"[debug sent ANSWER {ai_ans!r}]", file=sys.stderr)
+                    else:
+                        print(f"[debug no ANSWER sent for this question]", file=sys.stderr)
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -419,15 +424,16 @@ async def handle_server_messages() -> None:
 
 
             elif mtype == "RESULT":
+                # dump full RESULT to stderr for inspection
+                print(f"[debug RESULT] {msg}", file=sys.stderr)
                 fb = msg.get("feedback", "")
-                print(fb)
+                if fb != "":
+                    print(fb)
 
             elif mtype == "LEADERBOARD":
-                # teacher server uses "feedback"
-                # our dev server used "state"
-                fb = msg.get("feedback", None)
-                if fb is None:
-                    fb = msg.get("state", "")
+                # dump full LEADERBOARD to stderr for inspection
+                print(f"[debug LEADERBOARD] {msg}", file=sys.stderr)
+                fb = msg.get("feedback", msg.get("state", ""))
                 if fb != "":
                     print(fb)
 
