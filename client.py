@@ -605,7 +605,7 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
+    print(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
 
     # mode you: interactive. DO NOT auto-connect .
     # two sub-cases:
@@ -669,6 +669,7 @@ def main():
     dprint(USERNAME)
     dprint(cfg.get("host"))
     dprint(cfg.get("port"))
+    
 
     try:
         asyncio.run(main_async())
