@@ -203,12 +203,6 @@ def auto_answer(question_type: str, short_question: str) -> str:
 # ----------------- ai prompt -----------------
 
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
-    """
-    Ask the local Ollama model for an answer.
-
-    Returns a best-guess answer string (trimmed, single line).
-    If anything goes wrong (no response / bad parse), returns "".
-    """
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
@@ -217,42 +211,33 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "Final answer:"
     )
 
-    #if no host,port,model in config for ollma, give back empty string
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return ""
 
-    host = OLLAMA_HOST
-    port = OLLAMA_PORT
-    model = OLLAMA_MODEL
-
-     # 3. msg format (Ollama /api/generate expects JSON like {"model": "...", "prompt": "..."} )
     req_body_obj = {
-        "model": model,
+        "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False
     }
-    req_body_bytes = (json.dumps(req_body_obj, ensure_ascii=False)).encode("utf-8")
+    req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
 
-    # 4. set http header
-    http_headers = [
-        f"POST /api/generate HTTP/1.1",
-        f"Host: {host}",
+    headers = [
+        "POST /api/generate HTTP/1.1",
+        f"Host: {OLLAMA_HOST}",
         "Content-Type: application/json",
         f"Content-Length: {len(req_body_bytes)}",
-        "",  # blank line before body
+        "",
         ""
     ]
-    http_request_bytes = ("\r\n".join(http_headers)).encode("utf-8") + req_body_bytes
+    raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
 
-    # 5. open TCP and connect Ollama
     try:
-        reader, writer = await asyncio.open_connection(host, port)
+        reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
     except Exception:
-        return f"connect to AI {host}:{port} failed"
+        return ""
 
-    # 6. send HTTP ask
     try:
-        writer.write(http_request_bytes)
+        writer.write(raw_request)
         await writer.drain()
     except Exception:
         try:
@@ -260,14 +245,10 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
             await writer.wait_closed()
         except Exception:
             pass
-        return "send http ask failed"
+        return ""
 
-    # 7. read HTTP response
-    #    read until "\r\n\r\n" to separate header，then read body
     raw_response = b""
-    dprint(f"raw_response:{raw_response}")
     try:
-        # read until connection close
         while True:
             chunk = await reader.read(4096)
             if not chunk:
@@ -280,50 +261,42 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         except Exception:
             pass
 
-    # 8. parse HTTP response
-    #    be-like:
-    #    HTTP/1.1 200 OK
-    #    Content-Type: application/json
-    #    ...
-    #    \r\n
-    #    {"model":"mistral:latest","response":"42","done":true}
     try:
         raw_text = raw_response.decode("utf-8", errors="replace")
     except Exception:
-        return f"decode failed {raw_text}"
+        return ""
 
-    # separate header and body
-    # find the first "\r\n\r\n"
     sep_index = raw_text.find("\r\n\r\n")
     if sep_index == -1:
-        return f"sep_index {sep_index} not found"
-
+        return ""
     body_text = raw_text[sep_index+4:]
 
-    # 9. JSON body 
-    # Ollama returns something like:
-    # {
-    #   "model": "...",
-    #   "response": "42",
-    #   "done": true
-    # }
-    try:
-        body_json = json.loads(body_text)
-    except Exception:
-        return f"{body_json} load failed"
+    # robust parse: pick last JSON-looking line
+    candidate = ""
+    for line in body_text.strip().splitlines():
+        l = line.strip()
+        if l.startswith("{") and l.endswith("}"):
+            candidate = l
+    if candidate == "":
+        candidate = body_text.strip()
 
-    dprint(f"body_json:{body_json}")
+    try:
+        body_json = json.loads(candidate)
+    except Exception:
+        return ""
+
     ai_answer_raw = body_json.get("response", "")
     if not isinstance(ai_answer_raw, str):
         ai_answer_raw = str(ai_answer_raw)
 
     ai_answer = ai_answer_raw.strip()
+    if "\n" in ai_answer:
+        ai_answer = ai_answer.splitlines()[0].strip()
+    if ai_answer.endswith("."):
+        ai_answer = ai_answer[:-1].strip()
 
-    first_line = ai_answer.splitlines()[0].strip()
-    if first_line.endswith("."):
-        first_line = first_line[:-1].strip()
+    return ai_answer
 
-    return first_line
 # ----------------- server message loop -----------------
 
 async def handle_server_messages() -> None:
