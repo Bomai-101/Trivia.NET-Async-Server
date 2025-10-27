@@ -220,6 +220,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "stream": False
     }
     req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
+    print(f"req_body_bytes:{req_body_bytes}")
 
     headers = [
         "POST /api/generate HTTP/1.1",
@@ -229,11 +230,15 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "",
         ""
     ]
+    print(f"headers:{headers}")
+
     raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
+    print(f"raw_request:{raw_request}")
 
     try:
         reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
     except Exception:
+        print("connect failed")
         return ""
 
     try:
@@ -251,9 +256,11 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     try:
         while True:
             chunk = await reader.read(4096)
+            print(f"chunk:{chunk}")
             if not chunk:
                 break
             raw_response += chunk
+            print(f"raw_response:{raw_response}")
     finally:
         try:
             writer.close()
@@ -270,6 +277,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     if sep_index == -1:
         return ""
     body_text = raw_text[sep_index+4:]
+    print(f"body_text:{body_text}")
 
     # robust parse: pick last JSON-looking line
     candidate = ""
@@ -295,6 +303,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     if ai_answer.endswith("."):
         ai_answer = ai_answer[:-1].strip()
 
+    print(f"ai_answer:{ai_answer}")
     return ai_answer
 
 # ----------------- server message loop -----------------
