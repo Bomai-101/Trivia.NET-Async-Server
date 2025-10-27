@@ -613,10 +613,8 @@ async def main_async():
         # after handling CONNECT, we might be connected and receiving messages.
         # wait for game to end or disconnect.
         # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
-        try:
-            await asyncio.wait_for(EXIT_EVENT.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            pass
+        await EXIT_EVENT.wait()
+        sys.exit(0)
 
         sys.exit(0)
 
