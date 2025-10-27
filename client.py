@@ -423,8 +423,13 @@ async def handle_server_messages() -> None:
                 print(fb)
 
             elif mtype == "LEADERBOARD":
-                state = msg.get("state", "")
-                print(state)
+                # teacher server uses "feedback"
+                # our dev server used "state"
+                fb = msg.get("feedback", None)
+                if fb is None:
+                    fb = msg.get("state", "")
+                if fb != "":
+                    print(fb)
 
             elif mtype == "FINISHED":
                 final_standings = msg.get("final_standings", "")
