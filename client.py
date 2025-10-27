@@ -274,12 +274,17 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
 
     # 6. read full HTTP response (until close)
     raw_response = b""
+    # read with small timeout budget so we don't exceed tlimit
     try:
         while True:
-            chunk = await reader.read(4096)
+            # read one chunk but abort if takes too long
+            chunk = await asyncio.wait_for(reader.read(4096), timeout=max(0.6, tlimit * 0.8))
             if not chunk:
                 break
             raw_response += chunk
+    except asyncio.TimeoutError:
+        # partial read is fine — we just stop reading early
+        dprint(f"[ollama] read timeout after {tlimit}s (partial={len(raw_response)} bytes)")
     finally:
         try:
             writer.close()
