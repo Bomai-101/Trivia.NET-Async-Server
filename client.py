@@ -348,11 +348,18 @@ def load_client_config(path:Path)->Dict[str,Any]:
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT,OLLAMA_MODEL)} username={USERNAME}")
     # ---- NEW: warmup Ollama before connecting ----
-    if CLIENT_MODE=="ai":
+    if CLIENT_MODE == "ai":
+        # warmup round 1
         try:
             await asyncio.wait_for(warmup_ollama(), timeout=1.5)
         except Exception:
-            dprint("[warmup] skipped due to exception.")
+            dprint("[warmup] warmup #1 skipped due to exception.")
+
+        # warmup round 2
+        try:
+            await asyncio.wait_for(warmup_ollama(), timeout=1.5)
+        except Exception:
+            dprint("[warmup] warmup #2 skipped due to exception.")
     # stdin command handling (grader)
     if not sys.stdin.isatty():
         line=await asyncio.to_thread(sys.stdin.readline)
