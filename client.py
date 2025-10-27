@@ -240,7 +240,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     dprint(f"[ollama] req_body_bytes={req_body_bytes!r}")
 
     # 3. HTTP/1.1 request lines
-    #    NOTE: changed path from /api/generate -> /api/chat
+    #    NOTE: changed path from /api/generate ->  /api/chat
     headers = [
         "POST /api/chat HTTP/1.1",
         f"Host: {OLLAMA_HOST}",
