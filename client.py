@@ -265,7 +265,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     # 7. read HTTP response
     #    read until "\r\n\r\n" to separate header，then read body
     raw_response = b""
-    print(f"raw_response:{raw_response}")
+    dprint(f"raw_response:{raw_response}")
     try:
         # read until connection close
         while True:
@@ -312,7 +312,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     except Exception:
         return f"{body_json} load failed"
 
-    print(f"body_json:{body_json}")
+    dprint(f"body_json:{body_json}")
     ai_answer_raw = body_json.get("response", "")
     if not isinstance(ai_answer_raw, str):
         ai_answer_raw = str(ai_answer_raw)
@@ -368,7 +368,7 @@ async def handle_server_messages() -> None:
                     except asyncio.TimeoutError:
                         ai_ans = ""
 
-                    print(f"ai_ans:{ai_ans}")
+                    dprint(f"ai_ans:{ai_ans}")
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
