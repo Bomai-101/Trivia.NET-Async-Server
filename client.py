@@ -216,7 +216,12 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
 
     req_body_obj = {
         "model": OLLAMA_MODEL,
-        "prompt": prompt,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
         "stream": False
     }
     req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
@@ -294,8 +299,9 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         return ""
 
     ai_answer_raw = body_json.get("response", "")
-    if not isinstance(ai_answer_raw, str):
-        ai_answer_raw = str(ai_answer_raw)
+    if not ai_answer_raw:
+        ai_answer_raw = body_json.get("content", "")
+
 
     ai_answer = ai_answer_raw.strip()
     if "\n" in ai_answer:
