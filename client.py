@@ -342,7 +342,7 @@ async def handle_server_messages() -> None:
 
             # debug dump (extra output is allowed)
             dprint(f"[debug] received: {msg}")
-            print(f"[debug rx] {msg}")
+            dprint(f"[debug rx] {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
@@ -367,18 +367,19 @@ async def handle_server_messages() -> None:
                         )
                     except asyncio.TimeoutError:
                         ai_ans = ""
-                        print(f"[debug ai timeout] wait_for timed out after {tlimit}s")
+                        dprint(f"[debug ai timeout] wait_for timed out after {tlimit}s")
 
-                    print(f"[debug ai_ans before send] {ai_ans!r}")
+                    dprint(f"[debug ai_ans before send] {ai_ans!r}")
 
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ai_ans
                         })
-                        print(f"[debug sent ANSWER {ai_ans!r}]")
+                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
                     else:
-                        print(f"[debug no ANSWER sent for this question]")
+                        print("Error 404: Answer not found")
+                        dprint(f"[debug no ANSWER sent for this question]")
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -432,7 +433,7 @@ async def handle_server_messages() -> None:
 
             elif mtype == "LEADERBOARD":
                 # dump full LEADERBOARD to stderr for inspection
-                print(f"[debug LEADERBOARD] {msg}")
+                dprint(f"[debug LEADERBOARD] {msg}")
                 fb = msg.get("feedback", msg.get("state", ""))
                 if fb != "":
                     print(fb)
