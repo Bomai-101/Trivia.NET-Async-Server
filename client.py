@@ -196,22 +196,19 @@ def auto_answer(question_type: str, short_question: str) -> str:
 
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     """
-    Ask the local Ollama model (mocked by grader) for an answer.
+    Stream-aware fast Ollama query.
 
-    Contract with grader's mock Ollama:
-    - We must POST /api/chat
-    - Body shape must include { "model": ..., "messages": [...], "stream": false }
-    - It will reply with JSON that includes either:
-        { "message": {"role": "...", "content": "..."} }
-      OR
-        { "content": "..." }
-      OR
-        { "response": "..." }
-    - We must extract a short final answer string (no extra words).
-    - If anything fails, return "" quickly.
+    We connect to the grader's mock Ollama via /api/chat,
+    send one user message, then read the HTTP response incrementally.
+
+    As soon as we can extract a plausible final answer from the body,
+    we immediately stop reading and return it (to beat very small time_limit windows).
+
+    If we never manage to parse anything useful before timeout/EOF,
+    we fall back to whatever we got at the end; otherwise "".
     """
 
-    # 1. build user prompt
+    # 1. build prompt
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
@@ -220,11 +217,11 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "Final answer:"
     )
 
-    # no Ollama config? => tell caller "I got nothing"
+    # no Ollama config? -> bail immediately
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return ""
 
-    # 2. construct request JSON according to chat API
+    # 2. request body for /api/chat
     req_body_obj = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -235,12 +232,10 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         ],
         "stream": False
     }
-
     req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
     dprint(f"[ollama] req_body_bytes={req_body_bytes!r}")
 
-    # 3. HTTP/1.1 request lines
-    #    NOTE: changed path from /api/generate ->  /api/chat
+    # 3. HTTP request
     headers = [
         "POST /api/chat HTTP/1.1",
         f"Host: {OLLAMA_HOST}",
@@ -252,7 +247,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
     dprint(f"[ollama] raw_request={raw_request!r}")
 
-    # 4. open TCP to ollama
+    # 4. open TCP
     try:
         reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
     except Exception:
@@ -272,43 +267,142 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         dprint("[ollama] send failed")
         return ""
 
-    # 6. read full HTTP response (until close)
-    raw_response = b""
-    # read with small timeout budget so we don't exceed tlimit
+    # --- helper: extract earliest usable answer from partial HTTP body text ---
+
+    def _extract_from_partial(http_accum_text: str) -> Optional[str]:
+        """
+        Try to pull an answer out of partial HTTP response text.
+
+        Strategy:
+        1. Split off headers if possible (first \r\n\r\n).
+        2. Look in the body (which may be incomplete JSON)
+           for something that looks like:
+              "message":{"role":"assistant","content":"..."}
+           OR  "content":"..."
+           OR  "response":"..."
+        3. Return a cleaned single-line answer if found.
+        """
+        sep_idx = http_accum_text.find("\r\n\r\n")
+        if sep_idx == -1:
+            # Haven't even seen end of headers yet, can't parse body
+            return None
+        body_so_far = http_accum_text[sep_idx+4 : ]
+
+        # We'll search for the *last* match we can find so far, in case multiple appear.
+        # Very lightweight extraction: we look for `"content":"..."`
+        # and `"response":"..."`. We'll accept whichever we can decode first.
+        # We avoid greedy quotes by doing a manual scan.
+        for key in ["\"content\"", "\"response\""]:
+            start = body_so_far.rfind(key + ":")
+            if start != -1:
+                # find the first quote after key:
+                quote_start = body_so_far.find("\"", start + len(key) + 1)
+                if quote_start != -1:
+                    # and the ending quote after that:
+                    quote_end = body_so_far.find("\"", quote_start + 1)
+                    if quote_end != -1:
+                        raw_val = body_so_far[quote_start+1 : quote_end]
+                        ans = raw_val.strip()
+                        # squash multiline/trailing punctuation
+                        if "\n" in ans:
+                            ans = ans.splitlines()[0].strip()
+                        if ans.endswith("."):
+                            ans = ans[:-1].strip()
+                        if ans:
+                            return ans
+
+        # Another shape:  { "message": { "role":"assistant","content":"..." } }
+        # We'll try to locate `"message":{... "content":"..."}`
+        msg_idx = body_so_far.rfind("\"message\"")
+        if msg_idx != -1:
+            # Look for "content":"..." after that
+            c_key = "\"content\""
+            c_pos = body_so_far.find(c_key + ":", msg_idx)
+            if c_pos != -1:
+                q_start = body_so_far.find("\"", c_pos + len(c_key) + 1)
+                if q_start != -1:
+                    q_end = body_so_far.find("\"", q_start + 1)
+                    if q_end != -1:
+                        raw_val = body_so_far[q_start+1 : q_end]
+                        ans = raw_val.strip()
+                        if "\n" in ans:
+                            ans = ans.splitlines()[0].strip()
+                        if ans.endswith("."):
+                            ans = ans[:-1].strip()
+                        if ans:
+                            return ans
+
+        return None  # nothing confidently extracted yet
+
+    # buffer for all bytes we've seen so far
+    accum = b""
+    early_answer: Optional[str] = None
+
+    # We'll loop and read small-ish chunks, each with a *tiny* timeout,
+    # so we keep making progress fast and don't block longer than tlimit.
+    # Budget per read: something like min(0.1, tlimit * 0.4)
+    per_read_timeout = min(0.1, max(0.01, tlimit * 0.4))
+
     try:
         while True:
-            # read one chunk but abort if takes too long
-            chunk = await asyncio.wait_for(reader.read(4096), timeout=max(0.6, tlimit * 0.8))
-            if not chunk:
+            try:
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=per_read_timeout)
+            except asyncio.TimeoutError:
+                # no more data arrived quickly -> stop trying;
+                # maybe we already have partial data in accum.
                 break
-            raw_response += chunk
-    except asyncio.TimeoutError:
-        # partial read is fine — we just stop reading early
-        dprint(f"[ollama] read timeout after {tlimit}s (partial={len(raw_response)} bytes)")
+
+            if not chunk:
+                # EOF from Ollama
+                break
+
+            accum += chunk
+
+            # Try partial parse *right now* using what we have
+            try:
+                text_so_far = accum.decode("utf-8", errors="replace")
+            except Exception:
+                text_so_far = ""
+
+            maybe_ans = _extract_from_partial(text_so_far)
+            if maybe_ans:
+                early_answer = maybe_ans
+                dprint(f"[ollama] EARLY HIT: {early_answer!r}")
+                break
+
     finally:
+        # we actively close now; we don't care about rest of diagnostics
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
             pass
 
-    dprint(f"[ollama] raw_response={raw_response!r}")
+    # If we already captured an early answer, return it immediately
+    if early_answer:
+        # final clean: same trimming you had
+        ans = early_answer.strip()
+        if "\n" in ans:
+            ans = ans.splitlines()[0].strip()
+        if ans.endswith("."):
+            ans = ans[:-1].strip()
+        dprint(f"[ollama] final (early)={ans!r}")
+        return ans
 
-    # 7. decode bytes -> str
+    # otherwise fallback: parse whatever full/partial we got,
+    # basically your old logic.
     try:
-        raw_text = raw_response.decode("utf-8", errors="replace")
+        raw_text = accum.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
-    # 8. split headers/body on first \r\n\r\n
     sep_index = raw_text.find("\r\n\r\n")
     if sep_index == -1:
         return ""
     body_text = raw_text[sep_index + 4 :]
-    dprint(f"[ollama] body_text={body_text!r}")
+    dprint(f"[ollama] body_text(final)={body_text!r}")
 
-    # 9. some Ollama variants stream multiple JSON objs or add whitespace.
-    #    We'll try to grab the LAST valid {...} block.
+    # grab last {...} block if possible
     candidate = ""
     for line in body_text.strip().splitlines():
         l = line.strip()
@@ -317,40 +411,30 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     if candidate == "":
         candidate = body_text.strip()
 
-    # 10. parse JSON safely
     try:
         body_json = json.loads(candidate)
     except Exception:
-        dprint("[ollama] json parse failed")
+        dprint("[ollama] json parse failed (final)")
         return ""
 
-    # 11. extract answer from possible locations
     ai_answer_raw = ""
-
-    # preferred: chat-style message.content
     msg_obj = body_json.get("message")
     if isinstance(msg_obj, dict):
         ai_answer_raw = msg_obj.get("content", "") or ""
-
-    # fallback: direct "content"
     if not ai_answer_raw:
         ai_answer_raw = body_json.get("content", "") or ""
-
-    # fallback: "response"
     if not ai_answer_raw:
         ai_answer_raw = body_json.get("response", "") or ""
 
     ai_answer = str(ai_answer_raw).strip()
-
-    # 12. squash to first line, strip trailing "."
     if "\n" in ai_answer:
         ai_answer = ai_answer.splitlines()[0].strip()
     if ai_answer.endswith("."):
         ai_answer = ai_answer[:-1].strip()
 
-    dprint(f"[ollama] ai_answer(final)={ai_answer!r}")
-
+    dprint(f"[ollama] final (fallback)={ai_answer!r}")
     return ai_answer
+
 
 # ----------------- server message loop -----------------
 
