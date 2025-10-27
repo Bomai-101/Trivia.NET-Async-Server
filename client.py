@@ -616,8 +616,6 @@ async def main_async():
         await EXIT_EVENT.wait()
         sys.exit(0)
 
-        sys.exit(0)
-
     # interactive TTY case:
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
