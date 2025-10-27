@@ -315,7 +315,7 @@ async def handle_server_messages() -> None:
 
             # debug dump (extra output is allowed)
             dprint(f"[debug] received: {msg}")
-            print(f"[debug rx] {msg}")
+            dprint(f"[debug rx] {msg}")
 
             mtype = str(msg.get("message_type", "")).upper()
 
@@ -340,19 +340,19 @@ async def handle_server_messages() -> None:
                         )
                     except asyncio.TimeoutError:
                         ai_ans = ""
-                        print(f"[debug ai timeout] wait_for timed out after {tlimit}s")
+                        dprint(f"[debug ai timeout] wait_for timed out after {tlimit}s")
 
-                    print(f"[debug ai_ans before send] {ai_ans!r}")
+                    dprint(f"[debug ai_ans before send] {ai_ans!r}")
 
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ai_ans
                         })
-                        print(f"[debug sent ANSWER {ai_ans!r}]")
+                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
                     else:
                         print("Error 404: Answer not found")
-                        print(f"[debug no ANSWER sent for this question]")
+                        dprint(f"[debug no ANSWER sent for this question]")
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -399,14 +399,14 @@ async def handle_server_messages() -> None:
 
             elif mtype == "RESULT":
                 # dump full RESULT to stderr for inspection
-                print(f"[debug RESULT] {msg}")
+                dprint(f"[debug RESULT] {msg}")
                 fb = msg.get("feedback", "")
                 if fb != "":
                     print(fb)
 
             elif mtype == "LEADERBOARD":
                 # dump full LEADERBOARD to stderr for inspection
-                print(f"[debug LEADERBOARD] {msg}")
+                dprint(f"[debug LEADERBOARD] {msg}")
                 fb = msg.get("feedback", msg.get("state", ""))
                 if fb != "":
                     print(fb)
@@ -578,7 +578,7 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    print(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
 
     # mode you: interactive. DO NOT auto-connect .
     # two sub-cases:
