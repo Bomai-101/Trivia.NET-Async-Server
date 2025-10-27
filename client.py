@@ -360,6 +360,11 @@ async def main_async():
             await asyncio.wait_for(warmup_ollama(), timeout=1.5)
         except Exception:
             dprint("[warmup] warmup #2 skipped due to exception.")
+        # warmup round 3
+        try:
+            await asyncio.wait_for(warmup_ollama(), timeout=1.5)
+        except Exception:
+            dprint("[warmup] warmup #2 skipped due to exception.")
     # stdin command handling (grader)
     if not sys.stdin.isatty():
         line=await asyncio.to_thread(sys.stdin.readline)
