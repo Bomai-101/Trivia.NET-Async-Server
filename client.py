@@ -32,7 +32,7 @@ from typing import Any, Dict, Optional
 
 # ----------------- debug toggle -----------------
 
-DEBUG = False  # set True locally if you want verbose prints
+DEBUG = True  # set True locally if you want verbose prints
 
 def dprint(*args, **kwargs):
     if DEBUG:
