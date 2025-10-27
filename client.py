@@ -321,7 +321,7 @@ async def cmd_connect(host: str, port: int) -> None:
     else:
         # this line must be printed as plain output in at least one test case
         print("Connection failed")
-        return
+        sys.exit(0)
 
     CONN.reader, CONN.writer = reader, writer
 
