@@ -341,7 +341,8 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     # We'll loop and read small-ish chunks, each with a *tiny* timeout,
     # so we keep making progress fast and don't block longer than tlimit.
     # Budget per read: something like min(0.1, tlimit * 0.4)
-    per_read_timeout = min(0.1, max(0.01, tlimit * 0.4))
+    per_read_timeout = min(0.25, max(0.05, tlimit * 0.5))
+
 
     try:
         while True:
