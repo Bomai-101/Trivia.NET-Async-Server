@@ -78,6 +78,9 @@ CONN = Conn()
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
+OLLAMA_HOST: Optional[str] = None
+OLLAMA_PORT: Optional[int] = None
+OLLAMA_MODEL: Optional[str] = None
 
 # ----------------- auto-answer helpers -----------------
 
@@ -197,6 +200,128 @@ def auto_answer(question_type: str, short_question: str) -> str:
     # fallback
     return ""
 
+# ----------------- ai prompt -----------------
+
+async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
+    """
+    Ask the local Ollama model for an answer.
+
+    Returns a best-guess answer string (trimmed, single line).
+    If anything goes wrong (no response / bad parse), returns "".
+    """
+    prompt = (
+        "You are a quiz player. I will give you a question.\n"
+        "Answer with ONLY the final answer, no explanation, no extra words.\n"
+        f"Question type: {qtype}\n"
+        f"Question: {short_question}\n"
+        "Final answer:"
+    )
+
+    #if no host,port,model in config for ollma, give back empty string
+    if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
+        return ""
+
+    host = OLLAMA_HOST
+    port = OLLAMA_PORT
+    model = OLLAMA_MODEL
+
+     # 3. msg format (Ollama /api/generate expects JSON like {"model": "...", "prompt": "..."} )
+    req_body_obj = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False
+    }
+    req_body_bytes = (json.dumps(req_body_obj, ensure_ascii=False)).encode("utf-8")
+
+    # 4. set http header
+    http_headers = [
+        f"POST /api/generate HTTP/1.1",
+        f"Host: {host}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(req_body_bytes)}",
+        "",  # blank line before body
+        ""
+    ]
+    http_request_bytes = ("\r\n".join(http_headers)).encode("utf-8") + req_body_bytes
+
+    # 5. open TCP and connect Ollama
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except Exception:
+        return ""
+
+    # 6. send HTTP ask
+    try:
+        writer.write(http_request_bytes)
+        await writer.drain()
+    except Exception:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return ""
+
+    # 7. read HTTP response
+    #    read until "\r\n\r\n" to separate header，then read body
+    raw_response = b""
+    try:
+        # read until connection close
+        while True:
+            chunk = await reader.read(4096)
+            if not chunk:
+                break
+            raw_response += chunk
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+    # 8. parse HTTP response
+    #    be-like:
+    #    HTTP/1.1 200 OK
+    #    Content-Type: application/json
+    #    ...
+    #    \r\n
+    #    {"model":"mistral:latest","response":"42","done":true}
+    try:
+        raw_text = raw_response.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+    # separate header and body
+    # find the first "\r\n\r\n"
+    sep_index = raw_text.find("\r\n\r\n")
+    if sep_index == -1:
+        return ""
+
+    body_text = raw_text[sep_index+4:]
+
+    # 9. JSON body 
+    # Ollama returns something like:
+    # {
+    #   "model": "...",
+    #   "response": "42",
+    #   "done": true
+    # }
+    try:
+        body_json = json.loads(body_text)
+    except Exception:
+        return ""
+
+    ai_answer_raw = body_json.get("response", "")
+    if not isinstance(ai_answer_raw, str):
+        ai_answer_raw = str(ai_answer_raw)
+
+    ai_answer = ai_answer_raw.strip()
+
+    first_line = ai_answer.splitlines()[0].strip()
+    if first_line.endswith("."):
+        first_line = first_line[:-1].strip()
+
+    return first_line
 # ----------------- server message loop -----------------
 
 async def handle_server_messages() -> None:
@@ -231,13 +356,30 @@ async def handle_server_messages() -> None:
 
                 print(trivia)
 
-                if CLIENT_MODE in ("auto", "ai"):
+                if CLIENT_MODE == "ai":
+                    # ask LLM with timeout = tlimit
+                    try:
+                        ai_ans = await asyncio.wait_for(
+                            ask_ollama(short_q, qtype, tlimit),
+                            timeout=float(tlimit)
+                        )
+                    except asyncio.TimeoutError:
+                        ai_ans = ""
+
+                    if ai_ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ai_ans
+                        })
+
+                elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
                     dprint(f"[debug] auto answer: {ans}")
-                    await send_line(writer, {
-                        "message_type": "ANSWER",
-                        "answer": ans
-                    })
+                    if ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ans
+                        })
 
                 else:
                     ans = None
@@ -448,7 +590,7 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    dprint(f"[debug] startup mode={CLIENT_MODE} host={DEFAULT_HOST} port={DEFAULT_PORT} username={USERNAME}")
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
 
     # mode you: interactive. DO NOT auto-connect .
     # two sub-cases:
@@ -499,11 +641,20 @@ def main():
         print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
-    global CLIENT_MODE, USERNAME, DEFAULT_HOST, DEFAULT_PORT
+    global CLIENT_MODE, USERNAME, OLLAMA_HOST, OLLAMA_PORT, OLLAMA_MODEL
     CLIENT_MODE = mode_from_cfg
     USERNAME = cfg.get("username", "player")
-    DEFAULT_HOST = cfg.get("host", "127.0.0.1")
-    DEFAULT_PORT = int(cfg.get("port", 5050))
+
+    # if we're in ai mode, pull ollama info (LLM endpoint)
+    if CLIENT_MODE == "ai":
+        ollama_cfg = cfg.get("ollama_config", {}) or {}
+        OLLAMA_HOST = ollama_cfg.get("ollama_host", "localhost")
+        OLLAMA_PORT = int(ollama_cfg.get("ollama_port", 11434))
+        OLLAMA_MODEL = ollama_cfg.get("ollama_model", "mistral:latest")
+    else:
+        OLLAMA_HOST = None
+        OLLAMA_PORT = None
+        OLLAMA_MODEL = None
     dprint(USERNAME)
     dprint(cfg.get("host"))
     dprint(cfg.get("port"))
