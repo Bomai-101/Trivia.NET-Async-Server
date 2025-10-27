@@ -533,7 +533,7 @@ async def main() -> None:
         print(f"server.py: Binding to port {port} was unsuccessful", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[server] i am listening on 127.0.0.1:{port}")
+    print(f"[server] i  am listening on 127.0.0.1:{port}")
 
     # Start the coordinator in the background
     asyncio.create_task(coordinator())
