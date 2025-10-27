@@ -193,19 +193,18 @@ def auto_answer(question_type: str, short_question: str) -> str:
     return ""
 
 # ----------------- ai prompt (Ollama chat-style) -----------------
-
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     """
-    Stream-aware fast Ollama query.
+    Ultra-fast Ollama ask tuned for /api/chat only.
 
-    We connect to the grader's mock Ollama via /api/chat,
-    send one user message, then read the HTTP response incrementally.
+    Assumptions (to save time):
+    - We POST /api/chat with {"model": ..., "messages":[{"role":"user","content":prompt}], "stream": false}
+    - The reply body (possibly partial) will eventually contain:
+          "message":{"role":"assistant","content":"..."}
+      and we only care about that "content".
+    - We DO NOT fall back to 'response' or top-level 'content'.
 
-    As soon as we can extract a plausible final answer from the body,
-    we immediately stop reading and return it (to beat very small time_limit windows).
-
-    If we never manage to parse anything useful before timeout/EOF,
-    we fall back to whatever we got at the end; otherwise "".
+    If we can't parse that shape quickly, we just give up ("").
     """
 
     # 1. build prompt
@@ -217,7 +216,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "Final answer:"
     )
 
-    # no Ollama config? -> bail immediately
+    # bail immediately if no ollama config
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return ""
 
@@ -235,7 +234,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
     dprint(f"[ollama] req_body_bytes={req_body_bytes!r}")
 
-    # 3. HTTP request
+    # 3. raw HTTP request (still manual TCP for speed)
     headers = [
         "POST /api/chat HTTP/1.1",
         f"Host: {OLLAMA_HOST}",
@@ -247,14 +246,14 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
     dprint(f"[ollama] raw_request={raw_request!r}")
 
-    # 4. open TCP
+    # 4. connect
     try:
         reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
     except Exception:
         dprint("[ollama] connect failed")
         return ""
 
-    # 5. send request
+    # 5. send
     try:
         writer.write(raw_request)
         await writer.drain()
@@ -267,175 +266,152 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         dprint("[ollama] send failed")
         return ""
 
-    # --- helper: extract earliest usable answer from partial HTTP body text ---
+    # ---------- helper: parse partial for "message":{..."content":"..."} ----------
 
-    def _extract_from_partial(http_accum_text: str) -> Optional[str]:
+    def _extract_from_partial_minimal(http_text: str) -> Optional[str]:
         """
-        Try to pull an answer out of partial HTTP response text.
+        Very focused extractor:
+        - Wait until we have headers + body (\r\n\r\n)
+        - In the body, look for `"message":{ ... "content":"SOMETHING" ... }`
+        - Return SOMETHING if we can isolate it between quotes.
+        - We do NOT scan for 'response' or top-level 'content'.
+        """
 
-        Strategy:
-        1. Split off headers if possible (first \r\n\r\n).
-        2. Look in the body (which may be incomplete JSON)
-           for something that looks like:
-              "message":{"role":"assistant","content":"..."}
-           OR  "content":"..."
-           OR  "response":"..."
-        3. Return a cleaned single-line answer if found.
-        """
-        sep_idx = http_accum_text.find("\r\n\r\n")
+        sep_idx = http_text.find("\r\n\r\n")
         if sep_idx == -1:
-            # Haven't even seen end of headers yet, can't parse body
+            # haven't even seen end of headers; can't parse body yet
             return None
-        body_so_far = http_accum_text[sep_idx+4 : ]
 
-        # We'll search for the *last* match we can find so far, in case multiple appear.
-        # Very lightweight extraction: we look for `"content":"..."`
-        # and `"response":"..."`. We'll accept whichever we can decode first.
-        # We avoid greedy quotes by doing a manual scan.
-        for key in ["\"content\"", "\"response\""]:
-            start = body_so_far.rfind(key + ":")
-            if start != -1:
-                # find the first quote after key:
-                quote_start = body_so_far.find("\"", start + len(key) + 1)
-                if quote_start != -1:
-                    # and the ending quote after that:
-                    quote_end = body_so_far.find("\"", quote_start + 1)
-                    if quote_end != -1:
-                        raw_val = body_so_far[quote_start+1 : quote_end]
-                        ans = raw_val.strip()
-                        # squash multiline/trailing punctuation
-                        if "\n" in ans:
-                            ans = ans.splitlines()[0].strip()
-                        if ans.endswith("."):
-                            ans = ans[:-1].strip()
-                        if ans:
-                            return ans
+        body = http_text[sep_idx + 4 : ]
 
-        # Another shape:  { "message": { "role":"assistant","content":"..." } }
-        # We'll try to locate `"message":{... "content":"..."}`
-        msg_idx = body_so_far.rfind("\"message\"")
-        if msg_idx != -1:
-            # Look for "content":"..." after that
-            c_key = "\"content\""
-            c_pos = body_so_far.find(c_key + ":", msg_idx)
-            if c_pos != -1:
-                q_start = body_so_far.find("\"", c_pos + len(c_key) + 1)
-                if q_start != -1:
-                    q_end = body_so_far.find("\"", q_start + 1)
-                    if q_end != -1:
-                        raw_val = body_so_far[q_start+1 : q_end]
-                        ans = raw_val.strip()
-                        if "\n" in ans:
-                            ans = ans.splitlines()[0].strip()
-                        if ans.endswith("."):
-                            ans = ans[:-1].strip()
-                        if ans:
-                            return ans
+        # find last occurrence of `"message"` to bias toward newest
+        msg_pos = body.rfind("\"message\"")
+        if msg_pos == -1:
+            return None
 
-        return None  # nothing confidently extracted yet
+        # inside that region, find `"content":"..."`
+        # we'll do a light manual search starting from msg_pos
+        content_key = "\"content\""
+        c_pos = body.find(content_key + ":", msg_pos)
+        if c_pos == -1:
+            return None
 
-    # buffer for all bytes we've seen so far
+        # first quote after `"content":`
+        q_start = body.find("\"", c_pos + len(content_key) + 1)
+        if q_start == -1:
+            return None
+        q_end = body.find("\"", q_start + 1)
+        if q_end == -1:
+            return None
+
+        raw_val = body[q_start+1 : q_end]
+        ans = raw_val.strip()
+
+        # clean up: first line only, drop trailing "."
+        if "\n" in ans:
+            ans = ans.splitlines()[0].strip()
+        if ans.endswith("."):
+            ans = ans[:-1].strip()
+
+        if ans:
+            return ans
+        return None
+
+    # ---------- fast incremental read loop ----------
+
     accum = b""
     early_answer: Optional[str] = None
 
-    # We'll loop and read small-ish chunks, each with a *tiny* timeout,
-    # so we keep making progress fast and don't block longer than tlimit.
-    # Budget per read: something like min(0.1, tlimit * 0.4)
-    per_read_timeout = min(0.25, max(0.05, tlimit * 0.5))
-
+    # read small chunks, each with tiny timeout
+    # NOTE: to stay even more aggressive, let's make it a bit tighter:
+    per_read_timeout = min(0.2, max(0.03, tlimit * 0.4))
 
     try:
         while True:
             try:
                 chunk = await asyncio.wait_for(reader.read(1024), timeout=per_read_timeout)
             except asyncio.TimeoutError:
-                # no more data arrived quickly -> stop trying;
-                # maybe we already have partial data in accum.
+                # no new data fast enough -> bail
                 break
 
-            if not chunk:
-                # EOF from Ollama
+            if not chunk:  # EOF
                 break
 
             accum += chunk
 
-            # Try partial parse *right now* using what we have
+            # try to parse RIGHT NOW (minimal schema)
             try:
                 text_so_far = accum.decode("utf-8", errors="replace")
             except Exception:
                 text_so_far = ""
 
-            maybe_ans = _extract_from_partial(text_so_far)
-            if maybe_ans:
-                early_answer = maybe_ans
-                dprint(f"[ollama] EARLY HIT: {early_answer!r}")
+            maybe = _extract_from_partial_minimal(text_so_far)
+            if maybe:
+                early_answer = maybe
+                dprint(f"[ollama] EARLY HIT(min)={early_answer!r}")
                 break
-
     finally:
-        # we actively close now; we don't care about rest of diagnostics
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
             pass
 
-    # If we already captured an early answer, return it immediately
+    # if we got something early, return it immediately
     if early_answer:
-        # final clean: same trimming you had
         ans = early_answer.strip()
         if "\n" in ans:
             ans = ans.splitlines()[0].strip()
         if ans.endswith("."):
             ans = ans[:-1].strip()
-        dprint(f"[ollama] final (early)={ans!r}")
+        dprint(f"[ollama] final(min-early)={ans!r}")
         return ans
 
-    # otherwise fallback: parse whatever full/partial we got,
-    # basically your old logic.
+    # ---------- fallback parse at the end (still minimal schema) ----------
+
     try:
         raw_text = accum.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
-    sep_index = raw_text.find("\r\n\r\n")
-    if sep_index == -1:
+    sep_idx = raw_text.find("\r\n\r\n")
+    if sep_idx == -1:
         return ""
-    body_text = raw_text[sep_index + 4 :]
-    dprint(f"[ollama] body_text(final)={body_text!r}")
+    body_text = raw_text[sep_idx + 4 : ]
+    dprint(f"[ollama] body_text(min-final)={body_text!r}")
 
-    # grab last {...} block if possible
+    # try full JSON load ONCE, assuming it's valid-ish now
+    # to keep it minimal, we STILL only trust message.content
+    # (we won't even try other shapes)
+    # We try to grab last {...} block because Ollama sometimes repeats lines.
     candidate = ""
     for line in body_text.strip().splitlines():
-        l = line.strip()
-        if l.startswith("{") and l.endswith("}"):
-            candidate = l
+        line_s = line.strip()
+        if line_s.startswith("{") and line_s.endswith("}"):
+            candidate = line_s
     if candidate == "":
         candidate = body_text.strip()
 
     try:
         body_json = json.loads(candidate)
     except Exception:
-        dprint("[ollama] json parse failed (final)")
+        dprint("[ollama] json parse failed (min-final)")
         return ""
 
-    ai_answer_raw = ""
     msg_obj = body_json.get("message")
     if isinstance(msg_obj, dict):
         ai_answer_raw = msg_obj.get("content", "") or ""
-    if not ai_answer_raw:
-        ai_answer_raw = body_json.get("content", "") or ""
-    if not ai_answer_raw:
-        ai_answer_raw = body_json.get("response", "") or ""
+    else:
+        ai_answer_raw = ""
 
-    ai_answer = str(ai_answer_raw).strip()
-    if "\n" in ai_answer:
-        ai_answer = ai_answer.splitlines()[0].strip()
-    if ai_answer.endswith("."):
-        ai_answer = ai_answer[:-1].strip()
+    ans = str(ai_answer_raw).strip()
+    if "\n" in ans:
+        ans = ans.splitlines()[0].strip()
+    if ans.endswith("."):
+        ans = ans[:-1].strip()
 
-    dprint(f"[ollama] final (fallback)={ai_answer!r}")
-    return ai_answer
-
+    dprint(f"[ollama] final(min-fallback)={ans!r}")
+    return ans
 
 # ----------------- server message loop -----------------
 
