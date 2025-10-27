@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 # ----------------- debug toggle -----------------
-DEBUG = False
+DEBUG = True
 def dprint(*args, **kwargs):
     if DEBUG:
         print(*args, **kwargs)
