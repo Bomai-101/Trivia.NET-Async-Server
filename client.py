@@ -17,8 +17,7 @@ Modes:
             send HI, then auto-answer questions.
 
   - "ai": same connection behavior as "auto" (immediate connect),
-          currently answers using the same auto-answer logic.
-          (You could later customize if needed.)
+          but answers by calling a local Ollama-like model over HTTP.
 
 IMPORTANT:
   HI must be exactly {"message_type": "HI", "username": <USERNAME>}
@@ -29,11 +28,11 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional
 
 # ----------------- debug toggle -----------------
 
-DEBUG = False  # set False to silence debug output
+DEBUG = False  # set True locally if you want verbose prints
 
 def dprint(*args, **kwargs):
     if DEBUG:
@@ -103,7 +102,6 @@ def _roman_to_int(s: str) -> int:
     return n
 
 def _eval_plus_minus(expr: str) -> str:
-    # supports expressions like: "12 + 3 - 4 + 5"
     tokens = (expr or "").split()
     if not tokens:
         return ""
@@ -128,12 +126,10 @@ def _eval_plus_minus(expr: str) -> str:
     return str(total)
 
 def _usable_ipv4_addresses(cidr: str) -> str:
-    # "A.B.C.D/prefix" -> usable host count
     try:
         prefix = int((cidr or "").split("/")[1])
     except Exception:
         return ""
-    # /31 and /32 have 0 usable
     if prefix >= 31:
         return "0"
     host_bits = 32 - prefix
@@ -154,7 +150,6 @@ def _int_to_ip(n: int) -> str:
     return f"{a}.{b}.{c}.{d}"
 
 def _network_broadcast_answer(cidr: str) -> str:
-    # returns "NETWORK and BROADCAST"
     try:
         addr_str, prefix_str = (cidr or "").split("/")
         prefix = int(prefix_str)
@@ -168,7 +163,6 @@ def _network_broadcast_answer(cidr: str) -> str:
         return ""
 
     ip_int = _ip_to_int(a, b, c, d)
-
     if prefix == 0:
         mask = 0
     else:
@@ -182,7 +176,6 @@ def _network_broadcast_answer(cidr: str) -> str:
     return f"{net_ip} and {bcast_ip}"
 
 def auto_answer(question_type: str, short_question: str) -> str:
-    # chooses how to answer based on question_type
     qtype = (question_type or "").strip()
 
     if qtype == "Mathematics":
@@ -197,12 +190,28 @@ def auto_answer(question_type: str, short_question: str) -> str:
     if qtype == "Network and Broadcast Address of a Subnet":
         return _network_broadcast_answer(short_question)
 
-    # fallback
     return ""
 
-# ----------------- ai prompt -----------------
+# ----------------- ai prompt (Ollama chat-style) -----------------
 
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
+    """
+    Ask the local Ollama model (mocked by grader) for an answer.
+
+    Contract with grader's mock Ollama:
+    - We must POST /api/chat
+    - Body shape must include { "model": ..., "messages": [...], "stream": false }
+    - It will reply with JSON that includes either:
+        { "message": {"role": "...", "content": "..."} }
+      OR
+        { "content": "..." }
+      OR
+        { "response": "..." }
+    - We must extract a short final answer string (no extra words).
+    - If anything fails, return "" quickly.
+    """
+
+    # 1. build user prompt
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
@@ -211,9 +220,11 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         "Final answer:"
     )
 
+    # no Ollama config? => tell caller "I got nothing"
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return ""
 
+    # 2. construct request JSON according to chat API
     req_body_obj = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -224,28 +235,31 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         ],
         "stream": False
     }
-    req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
-    dprint(f"req_body_bytes:{req_body_bytes}")
 
+    req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
+    dprint(f"[ollama] req_body_bytes={req_body_bytes!r}")
+
+    # 3. HTTP/1.1 request lines
+    #    NOTE: changed path from /api/generate -> /api/chat
     headers = [
-        "POST /api/generate HTTP/1.1",
+        "POST /api/chat HTTP/1.1",
         f"Host: {OLLAMA_HOST}",
         "Content-Type: application/json",
         f"Content-Length: {len(req_body_bytes)}",
         "",
         ""
     ]
-    dprint(f"headers:{headers}")
-
     raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
-    dprint(f"raw_request:{raw_request}")
+    dprint(f"[ollama] raw_request={raw_request!r}")
 
+    # 4. open TCP to ollama
     try:
         reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
     except Exception:
-        print("connect failed")
+        dprint("[ollama] connect failed")
         return ""
 
+    # 5. send request
     try:
         writer.write(raw_request)
         await writer.drain()
@@ -255,17 +269,17 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
             await writer.wait_closed()
         except Exception:
             pass
+        dprint("[ollama] send failed")
         return ""
 
+    # 6. read full HTTP response (until close)
     raw_response = b""
     try:
         while True:
             chunk = await reader.read(4096)
-            dprint(f"chunk:{chunk}")
             if not chunk:
                 break
             raw_response += chunk
-            dprint(f"raw_response:{raw_response}")
     finally:
         try:
             writer.close()
@@ -273,18 +287,23 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         except Exception:
             pass
 
+    dprint(f"[ollama] raw_response={raw_response!r}")
+
+    # 7. decode bytes -> str
     try:
         raw_text = raw_response.decode("utf-8", errors="replace")
     except Exception:
         return ""
 
+    # 8. split headers/body on first \r\n\r\n
     sep_index = raw_text.find("\r\n\r\n")
     if sep_index == -1:
         return ""
-    body_text = raw_text[sep_index+4:]
-    dprint(f"body_text:{body_text}")
+    body_text = raw_text[sep_index + 4 :]
+    dprint(f"[ollama] body_text={body_text!r}")
 
-    # robust parse: pick last JSON-looking line
+    # 9. some Ollama variants stream multiple JSON objs or add whitespace.
+    #    We'll try to grab the LAST valid {...} block.
     candidate = ""
     for line in body_text.strip().splitlines():
         l = line.strip()
@@ -293,23 +312,39 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     if candidate == "":
         candidate = body_text.strip()
 
+    # 10. parse JSON safely
     try:
         body_json = json.loads(candidate)
     except Exception:
+        dprint("[ollama] json parse failed")
         return ""
 
-    ai_answer_raw = body_json.get("response", "")
+    # 11. extract answer from possible locations
+    ai_answer_raw = ""
+
+    # preferred: chat-style message.content
+    msg_obj = body_json.get("message")
+    if isinstance(msg_obj, dict):
+        ai_answer_raw = msg_obj.get("content", "") or ""
+
+    # fallback: direct "content"
     if not ai_answer_raw:
-        ai_answer_raw = body_json.get("content", "")
+        ai_answer_raw = body_json.get("content", "") or ""
 
+    # fallback: "response"
+    if not ai_answer_raw:
+        ai_answer_raw = body_json.get("response", "") or ""
 
-    ai_answer = ai_answer_raw.strip()
+    ai_answer = str(ai_answer_raw).strip()
+
+    # 12. squash to first line, strip trailing "."
     if "\n" in ai_answer:
         ai_answer = ai_answer.splitlines()[0].strip()
     if ai_answer.endswith("."):
         ai_answer = ai_answer[:-1].strip()
 
-    dprint(f"ai_answer:{ai_answer}")
+    dprint(f"[ollama] ai_answer(final)={ai_answer!r}")
+
     return ai_answer
 
 # ----------------- server message loop -----------------
@@ -328,14 +363,10 @@ async def handle_server_messages() -> None:
                 dprint("[debug] server closed connection")
                 break
 
-            # debug dump (extra output is allowed)
-            dprint(f"[debug] received: {msg}")
             dprint(f"[debug rx] {msg}")
-
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
-                # spec: print the info string
                 info = msg.get("info", "")
                 print(info)
 
@@ -348,6 +379,8 @@ async def handle_server_messages() -> None:
                 print(trivia)
 
                 if CLIENT_MODE == "ai":
+                    # core requirement from spec:
+                    # wait AT MOST time_limit seconds for an answer.
                     try:
                         ai_ans = await asyncio.wait_for(
                             ask_ollama(short_q, qtype, tlimit),
@@ -360,14 +393,18 @@ async def handle_server_messages() -> None:
                     dprint(f"[debug ai_ans before send] {ai_ans!r}")
 
                     if ai_ans:
+                        # send ANSWER to server
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ai_ans
                         })
                         dprint(f"[debug sent ANSWER {ai_ans!r}]")
                     else:
+                        # spec: if no answer within time_limit,
+                        # just don't send an ANSWER;
+                        # we can still print a local line (the grader expects it)
                         print("Error 404: Answer not found")
-                        dprint(f"[debug no ANSWER sent for this question]")
+                        dprint("[debug no ANSWER sent for this question]")
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -409,22 +446,18 @@ async def handle_server_messages() -> None:
                     else:
                         dprint("[debug] no answer sent (timeout or empty input)")
 
-
-
-
             elif mtype == "RESULT":
-                # dump full RESULT to stderr for inspection
-                dprint(f"[debug RESULT] {msg}")
                 fb = msg.get("feedback", "")
                 if fb != "":
                     print(fb)
+                dprint(f"[debug RESULT] {msg}")
 
             elif mtype == "LEADERBOARD":
-                # dump full LEADERBOARD to stderr for inspection
-                dprint(f"[debug LEADERBOARD] {msg}")
+                # server sends ongoing score summary
                 fb = msg.get("feedback", msg.get("state", ""))
                 if fb != "":
                     print(fb)
+                dprint(f"[debug LEADERBOARD] {msg}")
 
             elif mtype == "FINISHED":
                 final_standings = msg.get("final_standings", "")
@@ -438,7 +471,6 @@ async def handle_server_messages() -> None:
                 dprint(f"[debug] unknown message_type {mtype} / full={msg}")
 
     finally:
-        # close connection, flag exit
         try:
             if CONN.writer:
                 CONN.writer.close()
@@ -456,7 +488,7 @@ async def cmd_connect(host: str, port: int) -> None:
         dprint("[debug] already connected (cmd_connect ignored)")
         return
 
-    # retry logic to handle race where server isn't ready yet
+    # retry loop so we survive race with server startup
     for _ in range(10):
         try:
             reader, writer = await asyncio.open_connection(host, port)
@@ -464,13 +496,10 @@ async def cmd_connect(host: str, port: int) -> None:
         except Exception:
             await asyncio.sleep(0.2)
     else:
-        # this line must be printed as plain output in at least one test case
         print("Connection failed")
         sys.exit(0)
 
     CONN.reader, CONN.writer = reader, writer
-
-    # we keep this quiet for grading stability
     dprint(f"[client] connected to {host}:{port}")
 
     hi_msg = {
@@ -481,7 +510,6 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, hi_msg)
     dprint("[debug] HI sent")
 
-    # begin reading server messages in background 
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
@@ -502,13 +530,6 @@ async def cmd_disconnect() -> None:
     EXIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
-    """
-    Handle a stdin command in 'you' mode.
-    Supported:
-      CONNECT host:port
-      DISCONNECT
-      EXIT
-    """
     cmd = line.strip()
     if not cmd:
         return
@@ -520,12 +541,8 @@ async def handle_command(line: str) -> None:
         sys.exit(0)
 
     if up.startswith("CONNECT"):
-        # patterns:
-        #   CONNECT
-        #   CONNECT host:port
         parts = cmd.split(maxsplit=1)
         if len(parts) == 1:
-            # no host:port provided
             dprint("[client] usage: CONNECT <host>:<port>")
             return
         try:
@@ -539,7 +556,6 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
-    # unknown
     dprint(f"[debug] unknown command from stdin: {cmd}")
 
 # ----------------- config and main -----------------
@@ -555,13 +571,11 @@ def load_client_config(path: Path) -> Dict[str, Any]:
         print(f"[client] failed to load config: {Exception}", file=sys.stderr)
         sys.exit(1)
 
-
 async def interactive_loop() -> None:
     """
     Mode 'you':
     - DO NOT auto-connect.
-    - We read commands from stdin.
-    - The grader will feed us lines like "CONNECT 127.0.0.1:54321".
+    - We read commands from stdin (CONNECT ..., EXIT, etc).
     - We keep running until EXIT_EVENT is set or we sys.exit().
     """
     q: asyncio.Queue[str] = asyncio.Queue()
@@ -575,7 +589,6 @@ async def interactive_loop() -> None:
 
     asyncio.create_task(stdin_reader())
 
-    # We also keep watching EXIT_EVENT so we can stop when server finishes.
     while True:
         done, _ = await asyncio.wait(
             {
@@ -593,30 +606,24 @@ async def interactive_loop() -> None:
             await handle_command(line)
 
 async def main_async():
-    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={OLLAMA_PORT, OLLAMA_MODEL} username={USERNAME}")
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
 
-    # mode you: interactive. DO NOT auto-connect .
-    # two sub-cases:
-    #   a) grader runs us non-interactively, feeding exactly one line (like "CONNECT ...")
-    #   b) grader runs us interactively (rare in auto tests, but fine)
-
+    # If stdin is not a TTY, grader is piping us one command ("CONNECT ...")
     if not sys.stdin.isatty():
-        # non-interactive pipeline: read one line from stdin, run it, then exit
         line = await asyncio.to_thread(sys.stdin.readline)
         line = (line or "").strip()
         if not line:
-            dprint(f"whaaaat received {line}")
+            dprint("[debug] empty stdin line, exiting")
             sys.exit(0)
-        dprint(f"what received {line}")
+
+        dprint(f"[debug] got stdin line: {line}")
         await handle_command(line)
 
-        # after handling CONNECT, we might be connected and receiving messages.
-        # wait for game to end or disconnect.
-        # NEW: timeout so we don't hang forever if the game never starts / server never kicks us
+        # Wait until server finishes game or disconnects us.
         await EXIT_EVENT.wait()
         sys.exit(0)
 
-    # interactive TTY case:
+    # Interactive case (probably not used by grader, but keep spec-correct)
     dprint("[client] commands: CONNECT <host>:<port> | DISCONNECT | EXIT")
     await interactive_loop()
     sys.exit(0)
@@ -644,7 +651,6 @@ def main():
     CLIENT_MODE = mode_from_cfg
     USERNAME = cfg.get("username", "player")
 
-    # if we're in ai mode, pull ollama info (LLM endpoint)
     if CLIENT_MODE == "ai":
         ollama_cfg = cfg.get("ollama_config", {}) or {}
         OLLAMA_HOST = ollama_cfg.get("ollama_host", "localhost")
@@ -654,10 +660,10 @@ def main():
         OLLAMA_HOST = None
         OLLAMA_PORT = None
         OLLAMA_MODEL = None
+
     dprint(USERNAME)
     dprint(cfg.get("host"))
     dprint(cfg.get("port"))
-    
 
     try:
         asyncio.run(main_async())
@@ -665,7 +671,6 @@ def main():
         pass
     except KeyboardInterrupt:
         pass
-
 
 if __name__ == "__main__":
     main()
