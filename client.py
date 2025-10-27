@@ -248,7 +248,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
-        return ""
+        return f"connect to AI {host}:{port} failed"
 
     # 6. send HTTP ask
     try:
@@ -260,11 +260,12 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
             await writer.wait_closed()
         except Exception:
             pass
-        return ""
+        return "send http ask failed"
 
     # 7. read HTTP response
     #    read until "\r\n\r\n" to separate header，then read body
     raw_response = b""
+    print(f"raw_response:{raw_response}")
     try:
         # read until connection close
         while True:
@@ -289,13 +290,13 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     try:
         raw_text = raw_response.decode("utf-8", errors="replace")
     except Exception:
-        return ""
+        return f"decode failed {raw_text}"
 
     # separate header and body
     # find the first "\r\n\r\n"
     sep_index = raw_text.find("\r\n\r\n")
     if sep_index == -1:
-        return ""
+        return f"sep_index {sep_index} not found"
 
     body_text = raw_text[sep_index+4:]
 
@@ -309,8 +310,9 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     try:
         body_json = json.loads(body_text)
     except Exception:
-        return ""
+        return f"{body_json} load failed"
 
+    print(f"body_json:{body_json}")
     ai_answer_raw = body_json.get("response", "")
     if not isinstance(ai_answer_raw, str):
         ai_answer_raw = str(ai_answer_raw)
@@ -366,7 +368,7 @@ async def handle_server_messages() -> None:
                     except asyncio.TimeoutError:
                         ai_ans = ""
 
-                    print(ai_ans)
+                    print(f"ai_ans:{ai_ans}")
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
