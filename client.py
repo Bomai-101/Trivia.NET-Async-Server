@@ -453,7 +453,7 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ----------------- commands -----------------
+# ----------------- commands  -----------------
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
         return
