@@ -408,7 +408,7 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # "you" mode: read from stdin within time_limit
+                    # "you" mode:  read from stdin within time_limit
                     try:
                         raw = await asyncio.wait_for(
                             asyncio.to_thread(sys.stdin.readline),
