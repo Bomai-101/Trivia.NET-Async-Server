@@ -332,7 +332,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
     dprint(f"[ollama] final(min-fallback)={ans!r}")
     return ans
 
-# ----------------- warmup (UPDATED) -----------------
+# ----------------- warmup (UPDATED)-----------------
 async def warmup_ollama():
     """
     Preload the Ollama model before the first real question.
