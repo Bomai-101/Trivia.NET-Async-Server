@@ -465,7 +465,7 @@ async def coordinator() -> None:
             #   then DON'T send RESULT to them.
             # - Otherwise (answered OR last question), send RESULT.
             if (not answered):
-                # skip sending RESULT for unanswered, non-final question
+                #  skip sending RESULT for unanswered, non-final question
                 continue
 
             await send_line(p["w"], {
