@@ -464,7 +464,7 @@ async def coordinator() -> None:
             # - If player didn't answer AND it's NOT the last question,
             #   then DON'T send RESULT to them.
             # - Otherwise (answered OR last question), send RESULT.
-            if (not answered) and (i < total_questions):
+            if (not answered):
                 # skip sending RESULT for unanswered, non-final question
                 continue
 
