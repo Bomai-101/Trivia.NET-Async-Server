@@ -399,7 +399,7 @@ async def coordinator() -> None:
     total_questions = len(qtypes)
 
     for i, qtype in enumerate(qtypes, start=1):
-        # Clear answers for this round
+        # Clear answers for this  round
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
