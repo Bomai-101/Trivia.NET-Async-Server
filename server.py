@@ -540,7 +540,7 @@ async def coordinator() -> None:
                 })
             await asyncio.sleep(0.05)
 
-            # Now announce final standings to everyone
+            # Now announce final standings to  everyone
             final_text = build_final_standings()
             await broadcast({
                 "message_type": "FINISHED",
