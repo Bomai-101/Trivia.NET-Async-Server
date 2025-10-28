@@ -458,7 +458,7 @@ async def main_async():
         # wait for game over or EXIT
         await EXIT_EVENT.wait()
         sys.exit(0)
-        
+
     # start pumping stdin into USER_INPUT_QUEUE
     asyncio.create_task(pump_stdin())
 
