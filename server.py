@@ -560,7 +560,7 @@ def load_server_config(path: Path) -> Dict[str, Any]:
 
 async def main() -> None:
     args = sys.argv[1:]
-    # require: python server.py  --config <path>
+    # require: python server.py --config <path>
     if not args or args[0] != "--config" or len(args) < 2:
         print("server.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
