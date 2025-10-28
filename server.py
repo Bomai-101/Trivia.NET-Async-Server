@@ -539,7 +539,7 @@ async def coordinator() -> None:
                     "feedback": feedback
                 })
 
-            # Now announce final standings to everyone
+            # Now announce final standings  to everyone
             final_text = build_final_standings()
             await broadcast({
                 "message_type": "FINISHED",
