@@ -417,6 +417,7 @@ async def handle_server_messages() -> None:
                         ans = (raw or "").strip()
                     except asyncio.TimeoutError:
                         ans = ""
+                    print(f"ans: {ans}")
                     if ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
