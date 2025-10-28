@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Tuple
 import questions as qmod
 
 # ---------------- Global state ----------------
-PLAYERS: Dict[str, Dict[str, Any]] = {}      # pid -> {"w": writer, "name": str, "score": int}
+PLAYERS: Dict[str, Dict[str, Any]] = {}      # pid -> {"w": writer|None, "name": str, "score": int, "active": bool}
 CURRENT_ANSWERS: Dict[str, str] = {}         # username -> last answer (this round)
 SEEN_USERS: set[str] = set()                 # usernames that have ever sent HI
 
@@ -199,8 +199,8 @@ def pluralize_points(n: int) -> str:
 
 def sorted_players() -> List[Tuple[str, int]]:
     """
-    Return list of (name, score), sorted by score desc then name asc.
-    Uses only *currently connected* PLAYERS.
+    Return list of (name, score) for ALL players (even those who left),
+    sorted by score desc then name asc.
     """
     items = [(p["name"], p["score"]) for p in PLAYERS.values()]
     items.sort(key=lambda t: (-t[1], t[0]))
@@ -327,11 +327,8 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
             if mtype == "HI":
                 username = msg.get("username", pid)
                 async with LOCK:
-                    # mark this username as "seen", even if they disconnect later
                     SEEN_USERS.add(username)
-                    # keep active writer
-                    PLAYERS[pid] = {"w": w, "name": username, "score": 0}
-                    # once we've SEEN enough users at any time, start game
+                    PLAYERS[pid] = {"w": w, "name": username, "score": 0, "active": True}
                     if len(SEEN_USERS) >= REQUIRED_PLAYERS:
                         READY.set()
 
@@ -342,22 +339,29 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
                     CURRENT_ANSWERS[username] = ans
 
             elif mtype == "BYE":
+                async with LOCK:
+                    if pid in PLAYERS:
+                        PLAYERS[pid]["active"] = False  
+                        PLAYERS[pid]["w"] = None      
                 break
 
     finally:
         async with LOCK:
             if pid in PLAYERS:
-                del PLAYERS[pid]
+                PLAYERS[pid]["active"] = False
+                PLAYERS[pid]["w"] = None
         try:
             w.close()
             await w.wait_closed()
         except Exception:
             pass
 
+
+
 # broadcast helper for all *currently connected* players
 async def broadcast(msg: Dict[str, Any]) -> None:
     async with LOCK:
-        targets = list(PLAYERS.values())
+        targets = [p for p in PLAYERS.values() if p.get("w") is not None and p.get("active", False)]
 
     # send to everyone  concurrently
     tasks = []
