@@ -359,7 +359,7 @@ async def broadcast(msg: Dict[str, Any]) -> None:
     async with LOCK:
         targets = list(PLAYERS.values())
 
-    # send to everyone concurrently
+    # send to everyone  concurrently
     tasks = []
     for p in targets:
         tasks.append(send_line(p["w"], msg))
