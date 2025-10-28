@@ -448,7 +448,7 @@ async def main_async():
         if line:
             await handle_command(line)
         else:
-            # no input at all -> just exit
+            # no input at all  -> just exit
             sys.exit(0)
 
         # wait until EXIT_EVENT is set (e.g. EXIT command, or FINISHED later
