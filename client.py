@@ -338,10 +338,6 @@ async def warmup_ollama():
     Preload the Ollama model before the first real question.
 
     CHANGED:
-    - 只调用一次 ask_ollama("2 + 2", "Mathematics", tlimit=2.0)
-    - 不再用 asyncio.wait_for(...) 去硬性打断
-      这样可以确保预热过程在 main_async 继续之前彻底结束，
-      避免后续题目和预热答案串台。
     """
     if not (OLLAMA_HOST and OLLAMA_PORT and OLLAMA_MODEL):
         return
