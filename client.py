@@ -364,7 +364,7 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        EXIT_EVENT.set()
+        #EXIT_EVENT.set()
 
 # ----------------- commands  -----------------
 async def cmd_connect(host: str, port: int) -> None:
@@ -402,7 +402,7 @@ async def cmd_disconnect() -> None:
     except Exception:
         pass
     CONN.clear()
-    EXIT_EVENT.set()
+    #EXIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
     cmd = line.strip()
