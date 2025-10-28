@@ -440,7 +440,21 @@ async def main_async():
     # optional warmup (safe no-op if not ai)
     # if CLIENT_MODE == "ai":
     #     await warmup_ollama()
+    if not sys.stdin.isatty():
+        # read exactly one line from stdin (synchronously but off main loop)
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
 
+        if line:
+            await handle_command(line)
+        else:
+            # no input at all -> just exit
+            sys.exit(0)
+
+        # wait until EXIT_EVENT is set (e.g. EXIT command, or FINISHED later
+        # if they CONNECTed to a server)
+        await EXIT_EVENT.wait()
+        sys.exit(0)
     # start pumping stdin into USER_INPUT_QUEUE
     asyncio.create_task(pump_stdin())
 
