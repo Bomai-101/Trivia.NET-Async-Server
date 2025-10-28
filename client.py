@@ -151,186 +151,121 @@ def auto_answer(question_type: str, short_question: str) -> str:
     return ""
 
 # ----------------- ai prompt (Ollama chat-style) -----------------
-async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
+async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
     """
-    Send one question to the Ollama-like server and try to grab an answer
-    as fast as possible (partial body parse). We only trust
-    message.content in the JSON response.
+    Talk to the Ollama-compatible /api/chat endpoint and return EXACTLY the model's
+    message.content with no modification. On failure, return None.
+
+    We send stream:false so we expect one final JSON response (see ollama docs).
     """
-
-    prompt = (
-        "You are a quiz player. I will give you a question.\n"
-        "Answer with ONLY the final answer, no explanation, no extra words.\n"
-        f"Question type: {qtype}\n"
-        f"Question: {short_question}\n"
-        "Final answer:"
-    )
-
-    if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
-        return ""
-
-    req_body_obj = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "stream": False
-    }
-    req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
-    headers = [
-        "POST /api/chat HTTP/1.1",
-        f"Host: {OLLAMA_HOST}",
-        "Content-Type: application/json",
-        f"Content-Length: {len(req_body_bytes)}",
-        "",
-        ""
-    ]
-    raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
-
+    reader = None
+    writer = None
     try:
+        # Build the user prompt we send to the model
+        prompt = (
+            "You are a quiz player. I will give you a question.\n"
+            "Answer with ONLY the final answer, no explanation, no extra words.\n"
+            "Do NOT say anything except the direct answer.\n"
+            f"Question type: {qtype}\n"
+            f"Question: {short_question}\n"
+            "Final answer:"
+        )
+
+        req_body_obj = {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "stream": False
+        }
+
+        req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
+
+        # open TCP connection to Ollama host/port
         reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
-    except Exception:
-        dprint("[ollama] connect failed")
-        return ""
 
-    try:
+        # Minimal HTTP/1.1 POST
+        headers = [
+            "POST /api/chat HTTP/1.1",
+            f"Host: {OLLAMA_HOST}",
+            "Content-Type: application/json",
+            f"Content-Length: {len(req_body_bytes)}",
+            "",
+            ""
+        ]
+        raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
+
         writer.write(raw_request)
         await writer.drain()
-    except Exception:
+
+        # We'll read until socket closes OR timeout expires.
+        # We keep everything we saw so we can parse once at the end.
+        buf = bytearray()
+
+        async def _read_all():
+            # keep reading until EOF
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+
+        # Use the question time limit as our network+inference budget.
         try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        dprint("[ollama] send failed")
-        return ""
-
-    def _extract_from_partial_minimal(http_text: str) -> Optional[str]:
-        """
-        Minimal fast parser:
-        look for "message":{ ... "content":"..."}
-        and grab that "content".
-        """
-        sep_idx = http_text.find("\r\n\r\n")
-        if sep_idx == -1:
-            return None
-        body = http_text[sep_idx+4:]
-
-        msg_pos = body.rfind("\"message\"")
-        if msg_pos == -1:
-            return None
-
-        c_key = "\"content\""
-        c_pos = body.find(c_key + ":", msg_pos)
-        if c_pos == -1:
-            return None
-
-        q_start = body.find("\"", c_pos + len(c_key) + 1)
-        if q_start == -1:
-            return None
-        q_end = body.find("\"", q_start + 1)
-        if q_end == -1:
-            return None
-
-        ans = body[q_start+1:q_end].strip()
-        if "\n" in ans:
-            ans = ans.splitlines()[0].strip()
-        if ans.endswith("."):
-            ans = ans[:-1].strip()
-        return ans or None
-
-    accum = b""
-    early_answer: Optional[str] = None
-
-    t_start = asyncio.get_running_loop().time()
-    while True:
-        now = asyncio.get_running_loop().time()
-        remaining = tlimit - (now - t_start)
-        if remaining <= 0:
-            break
-
-        try:
-            chunk = await asyncio.wait_for(
-                reader.read(1024),
-                timeout=min(0.25, remaining)
-            )
+            await asyncio.wait_for(_read_all(), timeout=float(tlimit))
         except asyncio.TimeoutError:
-            # no new data quickly -> loop again (still inside total budget)
-            continue
+            # Timed out. We'll fall through and try to parse whatever we have so far.
+            pass
 
-        if not chunk:
-            break
+        raw_text = buf.decode("utf-8", errors="replace")
 
-        accum += chunk
+        # Separate headers and body: look for first blank line \r\n\r\n
+        sep_idx = raw_text.find("\r\n\r\n")
+        if sep_idx == -1:
+            # no header/body split -> maybe fake server just sent pure JSON with no HTTP framing
+            body_text = raw_text
+        else:
+            body_text = raw_text[sep_idx + 4:]
 
-        # try to parse immediately
+        # In some cases body_text might contain extra newlines before/after.
+        # We just need to json.loads() the actual JSON object.
+        candidate = ""
+        # Try to pick the last full {...} line if HTTP server echoed logs etc.
+        for line in body_text.strip().splitlines():
+            l = line.strip()
+            if l.startswith("{") and l.endswith("}"):
+                candidate = l
+        if candidate == "":
+            candidate = body_text.strip()
+
         try:
-            text_so_far = accum.decode("utf-8", errors="replace")
+            body_json = json.loads(candidate)
         except Exception:
-            text_so_far = ""
+            # couldn't parse cleanly -> give up
+            return None
 
-        maybe = _extract_from_partial_minimal(text_so_far)
-        if maybe:
-            early_answer = maybe
-            dprint(f"[ollama] EARLY HIT(min)={early_answer!r}")
-            break
+        msg_obj = body_json.get("message")
+        if isinstance(msg_obj, dict):
+            # IMPORTANT: DO NOT CLEAN / STRIP / TRUNCATE / MODIFY
+            # Return EXACTLY what Ollama said.
+            ai_answer_raw = msg_obj.get("content", "")
+            # we must return it as-is (converted to str in case it's not already)
+            return str(ai_answer_raw)
 
-    # close connection
-    try:
-        writer.close()
-        await writer.wait_closed()
+        return None
+
     except Exception:
-        pass
-
-    # if we got something early, clean+return
-    if early_answer:
-        ans = early_answer.strip()
-        if "\n" in ans:
-            ans = ans.splitlines()[0].strip()
-        if ans.endswith("."):
-            ans = ans[:-1].strip()
-        dprint(f"[ollama] final(min-early)={ans!r}")
-        return ans
-
-    # fallback parse whatever we have
-    try:
-        raw_text = accum.decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-    sep_idx = raw_text.find("\r\n\r\n")
-    if sep_idx == -1:
-        return ""
-    body_text = raw_text[sep_idx + 4:]
-
-    candidate = ""
-    for line in body_text.strip().splitlines():
-        l = line.strip()
-        if l.startswith("{") and l.endswith("}"):
-            candidate = l
-    if candidate == "":
-        candidate = body_text.strip()
-
-    try:
-        body_json = json.loads(candidate)
-    except Exception:
-        dprint("[ollama] json parse failed (min-final)")
-        return ""
-
-    msg_obj = body_json.get("message")
-    ai_answer_raw = msg_obj.get("content", "") if isinstance(msg_obj, dict) else ""
-
-    ans = str(ai_answer_raw).strip()
-    if "\n" in ans:
-        ans = ans.splitlines()[0].strip()
-    if ans.endswith("."):
-        ans = ans[:-1].strip()
-
-    dprint(f"[ollama] final(min-fallback)={ans!r}")
-    return ans
+        return None
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
 # ----------------- warmup (UPDATED) -----------------
 async def warmup_ollama():
