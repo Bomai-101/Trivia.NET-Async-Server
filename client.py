@@ -319,28 +319,21 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # you mode
-                    # Wait up to tlimit seconds for one line of user input
+                    # "you" mode -> wait for user stdin AT QUESTION TIME
                     try:
-                        user_line = await asyncio.wait_for(
-                            USER_INPUT_QUEUE.get(),
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit)
                         )
+                        ans = (raw or "").strip()
                     except asyncio.TimeoutError:
-                        user_line = ""
-
-                    upper_line = user_line.strip().upper()
-
-                    # If it's a command, handle it (and DO NOT send as ANSWER)
-                    if upper_line == "EXIT" or upper_line == "DISCONNECT" or upper_line.startswith("CONNECT"):
-                        await handle_command(user_line)
-                    else:
-                        ans = user_line.strip()
-                        if ans:
-                            await send_line(writer, {
-                                "message_type": "ANSWER",
-                                "answer": ans
-                            })
+                        ans = ""
+                    dprint(f"ans: {ans!r}")
+                    if ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ans
+                        })
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -369,7 +362,7 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        #EXIT_EVENT.set()
+        EXIT_EVENT.set()
 
 # ----------------- commands  -----------------
 async def cmd_connect(host: str, port: int) -> None:
