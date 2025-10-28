@@ -327,7 +327,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
             if mtype == "HI":
                 username = msg.get("username", pid)
                 async with LOCK:
-                    # mark this username as "seen", even if they disconnect later
+                    # mark this username as  "seen", even if they disconnect later
                     SEEN_USERS.add(username)
                     # keep active writer
                     PLAYERS[pid] = {"w": w, "name": username, "score": 0}
