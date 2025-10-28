@@ -394,6 +394,9 @@ async def coordinator() -> None:
         "info": ready_info
     })
 
+    # Let clients print READY before we move on to first QUESTION
+    await asyncio.sleep(0.05)
+
     total_questions = len(qtypes)
 
     for i, qtype in enumerate(qtypes, start=1):
