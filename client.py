@@ -324,33 +324,7 @@ async def handle_server_messages() -> None:
                     # - If it's a command like DISCONNECT / EXIT / CONNECT ...,
                     #   run that command instead of sending it as an ANSWER.
                     # - Otherwise, treat it as the quiz answer.
-                    ans = ""
-                    try:
-                        user_line = await asyncio.wait_for(
-                            USER_INPUT_QUEUE.get(),
-                            timeout=float(tlimit)
-                        )
-                    except asyncio.TimeoutError:
-                        user_line = ""
-
-                    dprint(f"[you-mode raw input] {user_line!r}")
-
-                    # Check if it's a command
-                    upper_line = user_line.strip().upper()
-
-                    if upper_line == "EXIT" or upper_line == "DISCONNECT" or upper_line.startswith("CONNECT"):
-                        # run it as a command, do NOT send as answer
-                        await handle_command(user_line)
-                        # after handling this command, we purposely do NOT send ANSWER
-                    else:
-                        ans = user_line.strip()
-                        if ans:
-                            await send_line(writer, {
-                                "message_type": "ANSWER",
-                                "answer": ans
-                            })
-
-
+                    pass
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -409,6 +383,7 @@ async def cmd_disconnect() -> None:
         return
     try:
         await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
+        await CONN.writer.drain()
     except Exception:
         pass
     try:
