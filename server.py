@@ -466,6 +466,8 @@ async def coordinator() -> None:
                 "feedback": feedback
             })
 
+        await asyncio.sleep(0.05)
+        
         if i < total_questions:
             state = build_leaderboard_state()
             await broadcast({
