@@ -11,6 +11,7 @@ Modes:
 """
 
 import asyncio
+import requests
 import json
 import sys
 from pathlib import Path
