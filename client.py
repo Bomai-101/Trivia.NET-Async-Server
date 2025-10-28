@@ -152,24 +152,29 @@ def auto_answer(question_type: str, short_question: str) -> str:
     return ""
 
 # ----------------- ai prompt (Ollama chat-style) -----------------
-async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
+async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
     """
-    Send one question to the Ollama-like server and try to grab an answer
-    as fast as possible (partial body parse). We only trust
-    message.content in the JSON response.
+    Call the Ollama-compatible /api/chat endpoint using the requests library.
+    Return EXACTLY the model's message.content with no modification.
+    If anything fails, return None.
+
+    We run requests.post() in a worker thread so this stays awaitable.
     """
 
+    if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
+        return None
+
+    # Build the prompt we send to the model
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
+        "Do NOT say anything except the direct answer.\n"
         f"Question type: {qtype}\n"
         f"Question: {short_question}\n"
         "Final answer:"
     )
 
-    if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
-        return ""
-
+    # Prepare request payload following the Ollama /api/chat spec
     req_body_obj = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -180,158 +185,49 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str:
         ],
         "stream": False
     }
-    req_body_bytes = json.dumps(req_body_obj, ensure_ascii=False).encode("utf-8")
-    headers = [
-        "POST /api/chat HTTP/1.1",
-        f"Host: {OLLAMA_HOST}",
-        "Content-Type: application/json",
-        f"Content-Length: {len(req_body_bytes)}",
-        "",
-        ""
-    ]
-    raw_request = ("\r\n".join(headers)).encode("utf-8") + req_body_bytes
 
-    try:
-        reader, writer = await asyncio.open_connection(OLLAMA_HOST, OLLAMA_PORT)
-    except Exception:
-        dprint("[ollama] connect failed")
-        return ""
+    url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
-    try:
-        writer.write(raw_request)
-        await writer.drain()
-    except Exception:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        dprint("[ollama] send failed")
-        return ""
-
-    def _extract_from_partial_minimal(http_text: str) -> Optional[str]:
+    def _do_request():
         """
-        Minimal fast parser:
-        look for "message":{ ... "content":"..."}
-        and grab that "content".
+        Blocking HTTP request using requests.post.
+        This will run in a background thread via asyncio.to_thread().
         """
-        sep_idx = http_text.find("\r\n\r\n")
-        if sep_idx == -1:
-            return None
-        body = http_text[sep_idx+4:]
-
-        msg_pos = body.rfind("\"message\"")
-        if msg_pos == -1:
-            return None
-
-        c_key = "\"content\""
-        c_pos = body.find(c_key + ":", msg_pos)
-        if c_pos == -1:
-            return None
-
-        q_start = body.find("\"", c_pos + len(c_key) + 1)
-        if q_start == -1:
-            return None
-        q_end = body.find("\"", q_start + 1)
-        if q_end == -1:
-            return None
-
-        ans = body[q_start+1:q_end].strip()
-        if "\n" in ans:
-            ans = ans.splitlines()[0].strip()
-        if ans.endswith("."):
-            ans = ans[:-1].strip()
-        return ans or None
-
-    accum = b""
-    early_answer: Optional[str] = None
-
-    t_start = asyncio.get_running_loop().time()
-    while True:
-        now = asyncio.get_running_loop().time()
-        remaining = tlimit - (now - t_start)
-        if remaining <= 0:
-            break
-
         try:
-            chunk = await asyncio.wait_for(
-                reader.read(1024),
-                timeout=min(0.25, remaining)
-            )
-        except asyncio.TimeoutError:
-            # no new data quickly -> loop again (still inside total budget)
-            continue
+            # timeout enforces total budget; use tlimit so we try to respect quiz time_limit
+            resp = requests.post(url, json=req_body_obj, timeout=float(tlimit))
 
-        if not chunk:
-            break
+            # If server errored (non-200), treat as no answer
+            if resp.status_code != 200:
+                return None
 
-        accum += chunk
+            body_json = resp.json()
 
-        # try to parse immediately
-        try:
-            text_so_far = accum.decode("utf-8", errors="replace")
+            # According to the Ollama /api/chat docs:
+            # {
+            #   "message": {
+            #     "role": "assistant",
+            #     "content": "the answer here"
+            #   },
+            #   ...
+            # }
+            msg_obj = body_json.get("message")
+            if isinstance(msg_obj, dict):
+                # CRITICAL RULE:
+                # DO NOT clean/strip/modify the AI answer.
+                ai_answer_raw = msg_obj.get("content", "")
+                return str(ai_answer_raw)
+
+            return None
         except Exception:
-            text_so_far = ""
+            return None
 
-        maybe = _extract_from_partial_minimal(text_so_far)
-        if maybe:
-            early_answer = maybe
-            dprint(f"[ollama] EARLY HIT(min)={early_answer!r}")
-            break
+    # run the blocking request in a thread so we can await it
+    result = await asyncio.to_thread(_do_request)
 
-    # close connection
-    try:
-        writer.close()
-        await writer.wait_closed()
-    except Exception:
-        pass
+    # result is either the raw answer from Ollama or None
+    return result
 
-    # if we got something early, clean+return
-    if early_answer:
-        ans = early_answer.strip()
-        if "\n" in ans:
-            ans = ans.splitlines()[0].strip()
-        if ans.endswith("."):
-            ans = ans[:-1].strip()
-        dprint(f"[ollama] final(min-early)={ans!r}")
-        return ans
-
-    # fallback parse whatever we have
-    try:
-        raw_text = accum.decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-    sep_idx = raw_text.find("\r\n\r\n")
-    if sep_idx == -1:
-        return ""
-    body_text = raw_text[sep_idx + 4:]
-
-    candidate = ""
-    for line in body_text.strip().splitlines():
-        l = line.strip()
-        if l.startswith("{") and l.endswith("}"):
-            candidate = l
-    if candidate == "":
-        candidate = body_text.strip()
-
-    try:
-        body_json = json.loads(candidate)
-    except Exception:
-        dprint("[ollama] json parse failed (min-final)")
-        return ""
-
-    msg_obj = body_json.get("message")
-    ai_answer_raw = msg_obj.get("content", "") if isinstance(msg_obj, dict) else ""
-
-    ans = str(ai_answer_raw).strip()
-    if "\n" in ans:
-        ans = ans.splitlines()[0].strip()
-    if ans.endswith("."):
-        ans = ans[:-1].strip()
-
-    dprint(f"[ollama] final(min-fallback)={ans!r}")
-    return ans
 
 # ----------------- warmup (UPDATED)-----------------
 async def warmup_ollama():
@@ -380,25 +276,28 @@ async def handle_server_messages() -> None:
 
                 if CLIENT_MODE == "ai":
                     try:
-                        # We bound the outer wait_for to tlimit too.
+                        # Bound outer wait_for using same time limit.
                         ai_ans = await asyncio.wait_for(
                             ask_ollama(short_q, qtype, tlimit),
                             timeout=float(tlimit)
                         )
                     except asyncio.TimeoutError:
-                        ai_ans = ""
+                        ai_ans = None
                         dprint(f"[debug ai timeout] after {tlimit}s")
 
+                    # IMPORTANT:
+                    # We MUST forward EXACTLY what the model said.
+                    # No strip(), no removing punctuation, nothing.
+                    if ai_ans is None:
+                        ai_ans = ""
+
                     dprint(f"[debug ai_ans before send] {ai_ans!r}")
-                    if ai_ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ai_ans
-                        })
-                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
-                    else:
-                        dprint("Error 404: Answer not found")
-                        dprint("[debug no ANSWER sent for this question]")
+
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ai_ans
+                    })
+                    dprint(f"[debug sent ANSWER {ai_ans!r}]")
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -407,23 +306,31 @@ async def handle_server_messages() -> None:
                             "message_type": "ANSWER",
                             "answer": ans
                         })
+                    else:
+                        # auto couldn't figure it out -> send empty anyway
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ""
+                        })
 
                 else:
-                    # "you" mode:  read from stdin within time_limit
+                    # "you" mode: read from stdin within time_limit
                     try:
                         raw = await asyncio.wait_for(
                             asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit)
                         )
-                        ans = (raw or "").strip()
+                        ans = (raw or "").rstrip("\r\n")
                     except asyncio.TimeoutError:
                         ans = ""
-                    dprint(f"ans: {ans}")
-                    if ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ans
-                        })
+
+                    dprint(f"ans: {ans!r}")
+
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ans
+                    })
+
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
