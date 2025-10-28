@@ -57,6 +57,7 @@ CONN = Conn()
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
+USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
@@ -318,23 +319,37 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # "you" mode: read from stdin within time_limit
+                    # "you" mode:
+                    # Wait for the next line the user typed, BUT:
+                    # - If it's a command like DISCONNECT / EXIT / CONNECT ...,
+                    #   run that command instead of sending it as an ANSWER.
+                    # - Otherwise, treat it as the quiz answer.
+                    ans = ""
                     try:
-                        raw = await asyncio.wait_for(
-                            asyncio.to_thread(sys.stdin.readline),
+                        user_line = await asyncio.wait_for(
+                            USER_INPUT_QUEUE.get(),
                             timeout=float(tlimit)
                         )
-                        ans = (raw or "").rstrip("\r\n")
                     except asyncio.TimeoutError:
-                        ans = ""
+                        user_line = ""
 
-                    dprint(f"ans: {ans!r}")
+                    dprint(f"[you-mode raw input] {user_line!r}")
 
-                    if ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ans
-                        })
+                    # Check if it's a command
+                    upper_line = user_line.strip().upper()
+
+                    if upper_line == "EXIT" or upper_line == "DISCONNECT" or upper_line.startswith("CONNECT"):
+                        # run it as a command, do NOT send as answer
+                        await handle_command(user_line)
+                        # after handling this command, we purposely do NOT send ANSWER
+                    else:
+                        ans = user_line.strip()
+                        if ans:
+                            await send_line(writer, {
+                                "message_type": "ANSWER",
+                                "answer": ans
+                            })
+
 
 
             elif mtype == "RESULT":
@@ -428,13 +443,15 @@ async def handle_command(line: str) -> None:
 
 # ----------------- main logic -----------------
 async def interactive_loop() -> None:
-    q: asyncio.Queue[str] = asyncio.Queue()
-
     async def stdin_reader():
         loop = asyncio.get_running_loop()
         def _read():
             for line in sys.stdin:
-                loop.call_soon_threadsafe(q.put_nowait, line.rstrip("\r\n"))
+                # push raw line (without trailing newline) into global queue
+                loop.call_soon_threadsafe(
+                    USER_INPUT_QUEUE.put_nowait,
+                    line.rstrip("\r\n")
+                )
         await asyncio.to_thread(_read)
 
     asyncio.create_task(stdin_reader())
@@ -442,7 +459,7 @@ async def interactive_loop() -> None:
     while True:
         done, _ = await asyncio.wait(
             {
-                asyncio.create_task(q.get()),
+                asyncio.create_task(USER_INPUT_QUEUE.get()),
                 asyncio.create_task(EXIT_EVENT.wait()),
             },
             return_when=asyncio.FIRST_COMPLETED,
@@ -452,7 +469,9 @@ async def interactive_loop() -> None:
             break
 
         for t in done:
-            await handle_command(t.result())
+            line = t.result()
+            await handle_command(line)
+
 
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
