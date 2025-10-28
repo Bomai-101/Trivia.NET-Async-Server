@@ -584,7 +584,7 @@ async def main() -> None:
 
     print(f"[server] i  am listening on 127.0.0.1:{port}")
 
-    # Start the coordinator in the  background
+    # Start the coordinator  in the  background
     asyncio.create_task(coordinator())
 
     # Run the server forever
