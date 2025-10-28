@@ -358,11 +358,16 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
 async def broadcast(msg: Dict[str, Any]) -> None:
     async with LOCK:
         targets = list(PLAYERS.values())
+
+    # send to everyone concurrently
+    tasks = []
     for p in targets:
-        try:
-            await send_line(p["w"], msg)
-        except Exception:
-            pass
+        tasks.append(send_line(p["w"], msg))
+
+    # wait for all writers to flush
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 # --------------------------------------------------------------------
 # Coordinator (game flow)
