@@ -392,11 +392,9 @@ async def coordinator() -> None:
     total_questions = len(qtypes)
 
     for i, qtype in enumerate(qtypes, start=1):
-        # Clear answers for this round
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # Generate the question content
         short_q = get_short_question_for(qtype)
 
         fmt = QUESTION_FORMATS.get(qtype)
@@ -410,7 +408,6 @@ async def coordinator() -> None:
 
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
 
-        # Broadcast QUESTION
         await broadcast({
             "message_type": "QUESTION",
             "question_type": qtype,
@@ -419,13 +416,11 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
 
-        # Allow players time to answer (+ small grace buffer to avoid race with ANSWER arrival)
         try:
             await asyncio.sleep(float(qsec) + 0.3)
         except Exception:
             await asyncio.sleep(0)
 
-        # Score and send RESULT to each player individually
         ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
         bad_tpl = CFG.get(
             "incorrect_answer",
@@ -436,20 +431,17 @@ async def coordinator() -> None:
 
         async with LOCK:
             players_snapshot = list(PLAYERS.values())
+            players_by_name = {p["name"]: p for p in players_snapshot}
+            answers_snapshot = dict(CURRENT_ANSWERS)
 
-        for p in players_snapshot:
-            name = p["name"]
-            raw_ans = CURRENT_ANSWERS.get(name, None)
+        for username, raw_ans in answers_snapshot.items():
+            p = players_by_name.get(username)
+            if p is None:
+                continue
 
-            answered = (raw_ans is not None)
-            ans = raw_ans.strip() if answered else ""
-
-            if correct_full is None:
-                ok = False
-                correct_str = "N/A"
-            else:
-                correct_str = correct_full
-                ok = (answered and ans == correct_full)
+            ans = raw_ans.strip()
+            correct_str = correct_full if correct_full is not None else "N/A"
+            ok = (ans == correct_full)
 
             if ok:
                 p["score"] += 1
@@ -460,25 +452,13 @@ async def coordinator() -> None:
                 correct_str
             )
 
-            # NEW RULE:
-            # - If player didn't answer AND it's NOT the last question,
-            #   then DON'T send RESULT to them.
-            # - Otherwise (answered OR last question), send RESULT.
-            if (not answered):
-                # skip sending RESULT for unanswered, non-final question
-                continue
-
             await send_line(p["w"], {
                 "message_type": "RESULT",
                 "correct": bool(ok),
                 "feedback": feedback
             })
 
-
-
-        # Branch: non-final question vs final  question
         if i < total_questions:
-            # Not the last question: send LEADERBOARD and then optional gap before next question
             state = build_leaderboard_state()
             await broadcast({
                 "message_type": "LEADERBOARD",
@@ -491,7 +471,6 @@ async def coordinator() -> None:
                 except Exception:
                     await asyncio.sleep(0)
         else:
-            # Last question: send FINISHED instead of LEADERBOARD
             final_text = build_final_standings()
             await broadcast({
                 "message_type": "FINISHED",
