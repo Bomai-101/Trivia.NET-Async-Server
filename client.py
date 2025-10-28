@@ -426,8 +426,18 @@ async def handle_command(line: str) -> None:
         return
 
     if up == "EXIT":
-        await cmd_disconnect()
+        if CONN.is_connected():
+            try:
+                await send_line(CONN.writer, {"message_type": "BYE"})
+                await CONN.writer.drain()
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+        await asyncio.sleep(0.05)
         sys.exit(0)
+
 
     if up.startswith("CONNECT"):
         try:
