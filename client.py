@@ -292,11 +292,15 @@ async def handle_server_messages() -> None:
                         ai_ans = ""
 
                     dprint(f"[debug ai_ans before send] {ai_ans!r}")
-
-                    await send_line(writer, {
-                        "message_type": "ANSWER",
-                        "answer": ai_ans
-                    })
+                    if ai_ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ai_ans
+                        })
+                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
+                    else:
+                        dprint("Error 404: Answer not found")
+                        dprint("[debug no ANSWER sent for this question]")
                     dprint(f"[debug sent ANSWER {ai_ans!r}]")
 
                 elif CLIENT_MODE == "auto":
@@ -310,7 +314,7 @@ async def handle_server_messages() -> None:
                         # auto couldn't figure it out -> send empty anyway
                         await send_line(writer, {
                             "message_type": "ANSWER",
-                            "answer": ""
+                            "answer": "Not generated"
                         })
 
                 else:
@@ -326,10 +330,11 @@ async def handle_server_messages() -> None:
 
                     dprint(f"ans: {ans!r}")
 
-                    await send_line(writer, {
-                        "message_type": "ANSWER",
-                        "answer": ans
-                    })
+                    if ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ans
+                        })
 
 
             elif mtype == "RESULT":
