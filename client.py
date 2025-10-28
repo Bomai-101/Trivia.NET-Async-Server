@@ -545,8 +545,8 @@ async def main_async():
 
     # ---- warmup Ollama BEFORE talking to the trivia server ----
     # CHANGED: now only one clean warmup call, no nested wait_for/timeouts.
-    if CLIENT_MODE == "ai":
-        await warmup_ollama()  # CHANGED
+    #if CLIENT_MODE == "ai":
+        #await warmup_ollama()  # CHANGED
 
     # After warmup is fully done, THEN we proceed to read stdin and connect to server.
     if not sys.stdin.isatty():
