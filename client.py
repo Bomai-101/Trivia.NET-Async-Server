@@ -448,7 +448,6 @@ async def interactive_loop() -> None:
         loop = asyncio.get_running_loop()
         def _read():
             for line in sys.stdin:
-                # push raw line (without trailing newline) into global queue
                 loop.call_soon_threadsafe(
                     USER_INPUT_QUEUE.put_nowait,
                     line.rstrip("\r\n")
@@ -457,21 +456,9 @@ async def interactive_loop() -> None:
 
     asyncio.create_task(stdin_reader())
 
-    while True:
-        done, _ = await asyncio.wait(
-            {
-                asyncio.create_task(USER_INPUT_QUEUE.get()),
-                asyncio.create_task(EXIT_EVENT.wait()),
-            },
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+    # just wait forever (or until EXIT_EVENT is set)
+    await EXIT_EVENT.wait()
 
-        if EXIT_EVENT.is_set():
-            break
-
-        for t in done:
-            line = t.result()
-            await handle_command(line)
 
 
 async def main_async():
