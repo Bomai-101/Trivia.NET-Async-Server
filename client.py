@@ -319,12 +319,28 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # "you" mode:
-                    # Wait for the next line the user typed, BUT:
-                    # - If it's a command like DISCONNECT / EXIT / CONNECT ...,
-                    #   run that command instead of sending it as an ANSWER.
-                    # - Otherwise, treat it as the quiz answer.
-                    pass
+                    # you mode
+                    # Wait up to tlimit seconds for one line of user input
+                    try:
+                        user_line = await asyncio.wait_for(
+                            USER_INPUT_QUEUE.get(),
+                            timeout=float(tlimit)
+                        )
+                    except asyncio.TimeoutError:
+                        user_line = ""
+
+                    upper_line = user_line.strip().upper()
+
+                    # If it's a command, handle it (and DO NOT send as ANSWER)
+                    if upper_line == "EXIT" or upper_line == "DISCONNECT" or upper_line.startswith("CONNECT"):
+                        await handle_command(user_line)
+                    else:
+                        ans = user_line.strip()
+                        if ans:
+                            await send_line(writer, {
+                                "message_type": "ANSWER",
+                                "answer": ans
+                            })
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -519,7 +535,7 @@ def main():
 
     try:
         asyncio.run(main_async())
-    except (SystemExit, KeyboardInterrupt):
+    except KeyboardInterrupt:
         pass
 
 if __name__ == "__main__":
