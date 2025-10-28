@@ -394,7 +394,7 @@ async def coordinator() -> None:
     })
 
     # Tiny delay so clients can print READY before first QUESTION
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0.3)
 
     total_questions = len(qtypes)
 
