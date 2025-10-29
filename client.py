@@ -463,7 +463,7 @@ async def main_async():
         USER_INPUT_QUEUE.put_nowait(ln.rstrip("\r\n"))
 
     await interactive_loop()
-    sys.exit(0)
+    #sys.exit(0)
 
 
 def load_client_config(path: Path) -> Dict[str, Any]:
