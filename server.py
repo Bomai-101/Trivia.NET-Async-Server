@@ -374,7 +374,7 @@ async def broadcast(msg: Dict[str, Any]) -> None:
 
 
 # --------------------------------------------------------------------
-# Coordinator (game flow)
+# Coordinator (game flow) 
 # -------------------------------------------------------------------
 async def coordinator() -> None:
     # Wait until enough distinct usernames have said HI
