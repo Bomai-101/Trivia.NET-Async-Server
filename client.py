@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-Async NDJSON client (spec-compliant, with debug prints).
+Async NDJSON client.
 
 Modes:
-  - "you": interactive
-  - "auto": bot
-  - "ai": uses local Ollama-like model via /api/chat
+  - "you": manual answers from stdin
+  - "auto": code-generated answers
+  - "ai": answers from local Ollama-like model via /api/chat
 """
 
 import asyncio
@@ -154,18 +154,9 @@ def auto_answer(question_type: str, short_question: str) -> str:
 
 # ----------------- ai prompt (Ollama chat-style) -----------------
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
-    """
-    Call the Ollama-compatible /api/chat endpoint using the requests library.
-    Return EXACTLY the model's message.content with no modification.
-    If anything fails, return None.
-
-    We run requests.post() in a worker thread so this stays awaitable.
-    """
-
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
 
-    # Build the prompt we send to the model
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
@@ -175,7 +166,6 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | No
         "Final answer:"
     )
 
-    # Prepare request payload following the Ollama /api/chat spec
     req_body_obj = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -190,58 +180,28 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | No
     url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
     def _do_request():
-        """
-        Blocking HTTP request using requests.post.
-        This will run in a background thread via asyncio.to_thread().
-        """
         try:
-            # timeout enforces total budget; use tlimit so we try to respect quiz time_limit
             resp = requests.post(url, json=req_body_obj, timeout=float(tlimit))
-
-            # If server errored (non-200), treat as no answer
             if resp.status_code != 200:
                 return None
-
             body_json = resp.json()
-
-            # According to the Ollama /api/chat docs:
-            # {
-            #   "message": {
-            #     "role": "assistant",
-            #     "content": "the answer here"
-            #   },
-            #   ...
-            # }
             msg_obj = body_json.get("message")
             if isinstance(msg_obj, dict):
-                # CRITICAL RULE:
-                # DO NOT clean/strip/modify the AI answer.
                 ai_answer_raw = msg_obj.get("content", "")
                 return str(ai_answer_raw)
-
             return None
         except Exception:
             return None
 
-    # run the blocking request in a thread so we can await it
     result = await asyncio.to_thread(_do_request)
-
-    # result is either the raw answer from Ollama or None
     return result
 
-
-# ----------------- warmup (UPDATED)-----------------
 async def warmup_ollama():
-    """
-    Preload the Ollama model before the first real question.
-
-    CHANGED:
-    """
     if not (OLLAMA_HOST and OLLAMA_PORT and OLLAMA_MODEL):
         return
     dprint("[warmup] starting Ollama warmup...")
     try:
-        _ = await ask_ollama("2 + 2", "Mathematics", tlimit=2.0)  # CHANGED
+        _ = await ask_ollama("2 + 2", "Mathematics", tlimit=2.0)
         dprint("[warmup] warmup finished cleanly.")
     except Exception:
         dprint("[warmup] warmup raised exception (ignored).")
@@ -277,7 +237,6 @@ async def handle_server_messages() -> None:
 
                 if CLIENT_MODE == "ai":
                     try:
-                        # Bound outer wait_for using same time limit.
                         ai_ans = await asyncio.wait_for(
                             ask_ollama(short_q, qtype, tlimit),
                             timeout=float(tlimit)
@@ -286,9 +245,6 @@ async def handle_server_messages() -> None:
                         ai_ans = None
                         dprint(f"[debug ai timeout] after {tlimit}s")
 
-                    # IMPORTANT:
-                    # We MUST forward EXACTLY what the model said.
-                    # No strip(), no removing punctuation, nothing.
                     if ai_ans is None:
                         ai_ans = ""
 
@@ -312,14 +268,12 @@ async def handle_server_messages() -> None:
                             "answer": ans
                         })
                     else:
-                        # auto couldn't figure it out -> send empty anyway
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": "Not generated"
                         })
 
                 else:
-                    # "you" mode -> wait for user stdin AT QUESTION TIME
                     try:
                         raw = await asyncio.wait_for(
                             asyncio.to_thread(sys.stdin.readline),
@@ -401,7 +355,6 @@ async def cmd_disconnect() -> None:
     except Exception:
         pass
     CONN.clear()
-    #EXIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
     cmd = line.strip()
@@ -422,7 +375,6 @@ async def handle_command(line: str) -> None:
         await asyncio.sleep(0.05)
         sys.exit(0)
 
-
     if up.startswith("CONNECT"):
         try:
             host, port_s = cmd.split()[1].split(":")
@@ -436,35 +388,53 @@ async def handle_command(line: str) -> None:
         return
 
 # ----------------- main logic  -----------------
-async def interactive_loop() -> None:
+async def interactive_loop(first_line: Optional[str]) -> None:
+    loop = asyncio.get_running_loop()
+
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
+
+    async def stdin_reader():
+        def _read_blocking():
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(
+                    USER_INPUT_QUEUE.put_nowait,
+                    line.rstrip("\r\n")
+                )
+        await asyncio.to_thread(_read_blocking)
+
     async def command_worker():
         while True:
             cmd_line = await USER_INPUT_QUEUE.get()
             await handle_command(cmd_line)
-    await command_worker()
 
+    async def server_done_watcher():
+        await EXIT_EVENT.wait()
+        # do not sys.exit() here; allow tester to still send EXIT after FINISHED
+
+    await asyncio.gather(stdin_reader(), command_worker(), server_done_watcher())
 
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
 
+    # warmup is optional; you can leave it disabled if timing-sensitive
     # if CLIENT_MODE == "ai":
     #     await warmup_ollama()
-    
-    try:
-        raw_all = sys.stdin.read()
-    except Exception:
-        raw_all = ""
-    lines = raw_all.splitlines()
 
-    if not lines:
+    try:
+        first_line = await asyncio.to_thread(sys.stdin.readline)
+    except Exception:
+        first_line = ""
+    first_line = (first_line or "").rstrip("\r\n")
+
+    if not first_line:
         sys.exit(0)
 
-    for ln in lines:
-        USER_INPUT_QUEUE.put_nowait(ln.rstrip("\r\n"))
+    if first_line.strip().upper() == "EXIT":
+        await handle_command(first_line)
+        sys.exit(0)
 
-    await interactive_loop()
-    #sys.exit(0)
-
+    await interactive_loop(first_line)
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
