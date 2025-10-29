@@ -463,14 +463,6 @@ async def main_async():
         #await warmup_ollama()  # CHANGED
 
     # After warmup is fully done, THEN we proceed to read stdin and connect to server.
-    if not sys.stdin.isatty():
-        line = await asyncio.to_thread(sys.stdin.readline)
-        line = (line or "").strip()
-        if not line:
-            sys.exit(0)
-        await handle_command(line)
-        await EXIT_EVENT.wait()
-        sys.exit(0)
 
     await interactive_loop()
     sys.exit(0)
