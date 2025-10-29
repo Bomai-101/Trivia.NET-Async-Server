@@ -495,35 +495,62 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
         return await asyncio.to_thread(_read)
 
     # start stdin reader and router
-    t1 = asyncio.create_task(stdin_reader())
-    t2 = asyncio.create_task(router_worker())
+    t_stdin = asyncio.create_task(stdin_reader())
+    t_router = asyncio.create_task(router_worker())
 
-    # wait for either server to finish or QUIT requested
-    done, pending = await asyncio.wait(
-        {EXIT_EVENT.wait(), QUIT_EVENT.wait()},
-        return_when=asyncio.FIRST_COMPLETED
-    )
+    # IMPORTANT: wrap Event.wait() into Tasks
+    t_quit = asyncio.create_task(QUIT_EVENT.wait())
+    t_exit = asyncio.create_task(EXIT_EVENT.wait())
 
-    for p in (t1, t2):
-        p.cancel()
-        try:
-            await p
-        except Exception:
-            pass
+    try:
+        done, pending = await asyncio.wait(
+            {t_quit, t_exit},
+            return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        # cancel the other event-wait task
+        for t in (t_quit, t_exit):
+            if not t.done():
+                t.cancel()
+        for t in (t_quit, t_exit):
+            try:
+                await t
+            except Exception:
+                pass
+
+        # stop stdin/router
+        for t in (t_stdin, t_router):
+            if not t.done():
+                t.cancel()
+        for t in (t_stdin, t_router):
+            try:
+                await t
+            except Exception:
+                pass
+
 
 
 async def main_async():
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
-        first_line = ""
-    first_line = (first_line or "").rstrip("\r\n")
+        sys.exit(0)
 
+    first_line = (first_line or "").strip()
     if not first_line:
-        return
+        sys.exit(0)
 
-    await interactive_loop(first_line=first_line)
+    # special EXIT handling
+    if first_line.upper() == "EXIT":
+        await handle_command(first_line)
+        sys.exit(0)
 
+    # normal CONNECT case
+    await handle_command(first_line)
+
+    # wait until server closes connection
+    await EXIT_EVENT.wait()
+    sys.exit(0)
 
 
 
