@@ -472,8 +472,6 @@ async def main_async():
         await EXIT_EVENT.wait()
         sys.exit(0)
 
-    await interactive_loop()
-    sys.exit(0)
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
