@@ -433,7 +433,7 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
 
-        # Wait for answers (fixed timing)
+        # Wait for answers(fixed timing)
         try:
             await asyncio.sleep(float(qsec))
         except Exception:
