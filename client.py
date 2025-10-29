@@ -349,7 +349,7 @@ async def handle_server_messages() -> None:
                 pass
             CONN.clear()
 
-            sys.exit(0)
+            
 
         elif mtype == "ERROR":
             print(f"[server] ERROR {msg.get('message')}")
