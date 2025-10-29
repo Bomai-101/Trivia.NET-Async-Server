@@ -438,47 +438,31 @@ async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} "
            f"port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
 
-    # optional warmup (safe no-op if not ai)
-    # if CLIENT_MODE == "ai":
-    #     await warmup_ollama()
-    if not sys.stdin.isatty():
-
-        asyncio.create_task(pump_stdin())
-        # read exactly one line from stdin (synchronously but off main loop)
-        try:
-            first_cmd = await asyncio.wait_for(USER_INPUT_QUEUE.get(), timeout=3.0)
-        except asyncio.TimeoutError:
-            first_cmd = ""
-
-        if first_cmd:
-            await handle_command(first_cmd)
-        else:
-            # nothing at all -> just exit
-            sys.exit(0)
-
-        # wait for game over or EXIT
-        await EXIT_EVENT.wait()
-        sys.exit(0)
-
-    # start pumping stdin into USER_INPUT_QUEUE
+    # 1. always start pumping stdin
     asyncio.create_task(pump_stdin())
 
-    # First line from stdin should be something like "CONNECT host:port".
-    # The autograder feeds it right away.
-    # We MUST consume it *once* here (not in a loop), run it as a command,
-    # then just wait for EXIT_EVENT (which is set after FINISHED).
+    # 2. read the first line (EXIT / CONNECT ...)
     try:
         first_cmd = await asyncio.wait_for(USER_INPUT_QUEUE.get(), timeout=3.0)
     except asyncio.TimeoutError:
         first_cmd = ""
 
-    if first_cmd:
-        await handle_command(first_cmd)
+    # 3. if no first input at all, just exit cleanly
+    if not first_cmd:
+        sys.exit(0)
 
-    # Now just idle until the game naturally ends or user EXITs.
+    # 4. if first input was "EXIT", exit immediately
+    if first_cmd.strip().upper() == "EXIT":
+        sys.exit(0)
+
+    # 5. otherwise treat first line as a command (likely CONNECT)
+    await handle_command(first_cmd)
+
+    # 6. wait for the game to end or future EXIT during a QUESTION
     await EXIT_EVENT.wait()
-    # graceful exit
+
     sys.exit(0)
+
 
 # ------------- config loader / main() entrypoint -------------
 def load_client_config(path: Path) -> Dict[str, Any]:
