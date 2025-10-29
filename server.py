@@ -392,7 +392,7 @@ async def coordinator() -> None:
         ready_info = ready_info_tpl
 
     # Give clients time to start  their read loops before READY
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
 
     # Broadcast READY message
     await broadcast({
@@ -401,7 +401,7 @@ async def coordinator() -> None:
     })
 
     # Give clients time to print READY before the first QUESTION
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
 
     total_questions = len(qtypes)
 
