@@ -445,20 +445,12 @@ async def interactive_loop() -> None:
                     USER_INPUT_QUEUE.put_nowait,
                     line.rstrip("\r\n")
                 )
-        # run blocking read of stdin in a thread
         await asyncio.to_thread(_read)
 
-    async def command_worker():
-        while True:
-            cmd_line = await USER_INPUT_QUEUE.get()
-            await handle_command(cmd_line)
-
     asyncio.create_task(stdin_reader())
-    asyncio.create_task(command_worker())
 
-    # wait until the server finishes (EXIT_EVENT is set in handle_server_messages)
+    # just wait forever (or until EXIT_EVENT is set)
     await EXIT_EVENT.wait()
-
 
 
 
@@ -471,7 +463,14 @@ async def main_async():
         #await warmup_ollama()  # CHANGED
 
     # After warmup is fully done, THEN we proceed to read stdin and connect to server.
-
+    if not sys.stdin.isatty():
+        line = await asyncio.to_thread(sys.stdin.readline)
+        line = (line or "").strip()
+        if not line:
+            sys.exit(0)
+        await handle_command(line)
+        await EXIT_EVENT.wait()
+        sys.exit(0)
 
     await interactive_loop()
     sys.exit(0)
