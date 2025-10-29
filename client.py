@@ -436,48 +436,31 @@ async def handle_command(line: str) -> None:
         return
 
 # ----------------- main logic  -----------------
-async def interactive_loop(first_line: Optional[str] = None) -> None:
-    loop = asyncio.get_running_loop()
-    if first_line:
-        USER_INPUT_QUEUE.put_nowait(first_line)
 
-    async def stdin_reader():
-        def _read():
-            for line in sys.stdin:
-                loop.call_soon_threadsafe(
-                    USER_INPUT_QUEUE.put_nowait,
-                    line.rstrip("\r\n")
-                )
-        return await asyncio.to_thread(_read)
-
-    async def command_worker():
-        while True:
-            cmd_line = await USER_INPUT_QUEUE.get()
-            await handle_command(cmd_line)
-    await asyncio.gather(stdin_reader(), command_worker())
 
 
 async def main_async():
-    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
-
-    # if CLIENT_MODE == "ai":
-    #     await warmup_ollama()
-    
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
-        first_line = ""
-    first_line = (first_line or "").rstrip("\r\n")
+        sys.exit(0)
 
+    first_line = (first_line or "").strip()
     if not first_line:
         sys.exit(0)
 
-    if first_line.strip().upper() == "EXIT":
+    # special EXIT handling
+    if first_line.upper() == "EXIT":
         await handle_command(first_line)
         sys.exit(0)
 
-    await interactive_loop(first_line=first_line)
+    # normal CONNECT case
+    await handle_command(first_line)
+
+    # wait until server closes connection
+    await EXIT_EVENT.wait()
     sys.exit(0)
+
 
 
 def load_client_config(path: Path) -> Dict[str, Any]:
