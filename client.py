@@ -320,26 +320,24 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # "you" mode: wait for router-provided line instead of reading stdin here
-                    global AWAITING_ANSWER
-                    # create a one-shot future to receive exactly one answer line
-                    fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-                    AWAITING_ANSWER = fut
+                    # "you" mode -> wait for user stdin AT QUESTION TIME
                     try:
-                        ans = await asyncio.wait_for(fut, timeout=float(tlimit))
-                        ans = (ans or "").strip()
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(sys.stdin.readline),
+                            timeout=float(tlimit)
+                        )
+                        ans = (raw or "").strip()
                     except asyncio.TimeoutError:
                         ans = ""
-                    finally:
-                        # clear waiting state no matter what
-                        if AWAITING_ANSWER is fut:
-                            AWAITING_ANSWER = None
 
-                    if ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ans
-                        })
+                    
+                    if not ans:
+                        ans = "Not generated"
+
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ans
+                    })
 
 
             elif mtype == "RESULT":
@@ -515,24 +513,36 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
     )
 
 async def main_async():
-    # Read all stdin once (works for both piping and interactive harness)
     try:
-        raw_all = sys.stdin.read()
+        first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
-        raw_all = ""
+        return 
 
-    lines = [ln.rstrip("\r\n") for ln in raw_all.splitlines()]
+    first_line = (first_line or "").strip()
+    if not first_line:
+        return
 
-    # Hardcode fast-path for the grader's "Client has EXIT command" testcase:
-    # The testcase feeds exactly one line: "EXIT\n".
-    if len(lines) == 1 and lines[0].strip().upper() == "EXIT":
-        return  # clean exit: no tasks created, process terminates
 
-    # Otherwise, normal path: enqueue all lines and run your loop
-    for ln in lines:
-        USER_INPUT_QUEUE.put_nowait(ln)
+    if first_line.upper() == "EXIT":
+        if CONN.is_connected():
+            try:
+                await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
+                await CONN.writer.drain()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            try:
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+        return  
 
-    await interactive_loop()
+
+    await handle_command(first_line)
+
+    await EXIT_EVENT.wait()
+
 
 
 
