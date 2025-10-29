@@ -437,29 +437,24 @@ async def handle_command(line: str) -> None:
 
 # ----------------- main logic  -----------------
 async def interactive_loop(first_line: Optional[str] = None) -> None:
+    loop = asyncio.get_running_loop()
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
+
     async def stdin_reader():
-        loop = asyncio.get_running_loop()
         def _read():
             for line in sys.stdin:
                 loop.call_soon_threadsafe(
                     USER_INPUT_QUEUE.put_nowait,
                     line.rstrip("\r\n")
                 )
-        await asyncio.to_thread(_read)
+        return await asyncio.to_thread(_read)
 
     async def command_worker():
         while True:
             cmd_line = await USER_INPUT_QUEUE.get()
             await handle_command(cmd_line)
-
-    if first_line:
-        USER_INPUT_QUEUE.put_nowait(first_line)
-
-    asyncio.create_task(stdin_reader())
-    asyncio.create_task(command_worker())
-
-    await EXIT_EVENT.wait()
-
+    await asyncio.gather(stdin_reader(), command_worker())
 
 
 async def main_async():
@@ -467,7 +462,7 @@ async def main_async():
 
     # if CLIENT_MODE == "ai":
     #     await warmup_ollama()
-
+    
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
