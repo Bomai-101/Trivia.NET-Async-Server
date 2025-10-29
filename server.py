@@ -399,7 +399,7 @@ async def coordinator() -> None:
 
     # Tiny delay so clients can print READY before first QUESTION
     try:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
     except Exception:
         await asyncio.sleep(0)
 
