@@ -251,118 +251,109 @@ async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
 
-    try:
-        while True:
+    while True:
+        msg = await read_line_json(reader)
+        if msg is None:
             try:
-                msg = await read_line_json(reader)
-            except ConnectionResetError:
-                break
-            if msg is None:
-                dprint("[debug] server closed connection")
-                break
+                if CONN.writer:
+                    CONN.writer.close()
+                    await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+            sys.exit(0)
 
-            dprint(f"[debug rx] {msg}")
-            mtype = str(msg.get("message_type", "")).upper()
+        mtype = str(msg.get("message_type", "")).upper()
 
-            if mtype == "READY":
-                print(msg.get("info", ""))
+        if mtype == "READY":
+            info = msg.get("info", "")
+            if info:
+                print(info)
 
-            elif mtype == "QUESTION":
-                trivia   = msg.get("trivia_question", "")
-                qtype    = msg.get("question_type", "")
-                short_q  = msg.get("short_question", "")
-                tlimit   = msg.get("time_limit", 0)
+        elif mtype == "QUESTION":
+            trivia   = msg.get("trivia_question", "")
+            qtype    = msg.get("question_type", "")
+            short_q  = msg.get("short_question", "")
+            tlimit   = msg.get("time_limit", 0)
 
+            if trivia:
                 print(trivia)
 
-                if CLIENT_MODE == "ai":
-                    try:
-                        # Bound outer wait_for using same time limit.
-                        ai_ans = await asyncio.wait_for(
-                            ask_ollama(short_q, qtype, tlimit),
-                            timeout=float(tlimit)
-                        )
-                    except asyncio.TimeoutError:
-                        ai_ans = None
-                        dprint(f"[debug ai timeout] after {tlimit}s")
+            if CLIENT_MODE == "ai":
+                try:
+                    ai_ans = await asyncio.wait_for(
+                        ask_ollama(short_q, qtype, tlimit),
+                        timeout=float(tlimit)
+                    )
+                except asyncio.TimeoutError:
+                    ai_ans = None
 
-                    # IMPORTANT:
-                    # We MUST forward EXACTLY what the model said.
-                    # No strip(), no removing punctuation, nothing.
-                    if ai_ans is None:
-                        ai_ans = ""
+                if ai_ans is None:
+                    ai_ans = ""
 
-                    dprint(f"[debug ai_ans before send] {ai_ans!r}")
-                    if ai_ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ai_ans
-                        })
-                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
-                    else:
-                        dprint("Error 404: Answer not found")
-                        dprint("[debug no ANSWER sent for this question]")
-                    dprint(f"[debug sent ANSWER {ai_ans!r}]")
+                if ai_ans:
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ai_ans
+                    })
 
-                elif CLIENT_MODE == "auto":
-                    ans = auto_answer(qtype, short_q)
-                    if ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ans
-                        })
-                    else:
-                        # auto couldn't figure it out -> send empty anyway
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": "Not generated"
-                        })
-
+            elif CLIENT_MODE == "auto":
+                ans = auto_answer(qtype, short_q)
+                if ans:
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ans
+                    })
                 else:
-                    # "you" mode -> wait for user stdin AT QUESTION TIME
-                    try:
-                        raw = await asyncio.wait_for(
-                            asyncio.to_thread(sys.stdin.readline),
-                            timeout=float(tlimit)
-                        )
-                        ans = (raw or "").strip()
-                    except asyncio.TimeoutError:
-                        ans = ""
-                    dprint(f"ans: {ans!r}")
-                    if ans:
-                        await send_line(writer, {
-                            "message_type": "ANSWER",
-                            "answer": ans
-                        })
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": "Not generated"
+                    })
 
-            elif mtype == "RESULT":
-                fb = msg.get("feedback", "")
-                if fb:
-                    print(fb)
-                dprint(f"[debug RESULT] {msg}")
+            else:
+                # "you" mode
+                try:
+                    raw = await asyncio.wait_for(
+                        asyncio.to_thread(sys.stdin.readline),
+                        timeout=float(tlimit)
+                    )
+                    ans = (raw or "").strip()
+                except asyncio.TimeoutError:
+                    ans = ""
+                if ans:
+                    await send_line(writer, {
+                        "message_type": "ANSWER",
+                        "answer": ans
+                    })
 
-            elif mtype == "LEADERBOARD":
-                fb = msg.get("feedback", msg.get("state", ""))
-                if fb:
-                    print(fb)
-                dprint(f"[debug LEADERBOARD] {msg}")
+        elif mtype == "RESULT":
+            fb = msg.get("feedback", "")
+            if fb:
+                print(fb)
 
-            elif mtype == "FINISHED":
-                print(msg.get("final_standings", ""))
-                break
+        elif mtype == "LEADERBOARD":
+            fb = msg.get("feedback", msg.get("state", ""))
+            if fb:
+                print(fb)
 
-            elif mtype == "ERROR":
-                print(f"[server] ERROR {msg.get('message')}")
+        elif mtype == "FINISHED":
+            final_txt = msg.get("final_standings", "")
+            if final_txt:
+                print(final_txt)
 
-    finally:
-        try:
-            if CONN.writer:
-                CONN.writer.close()
-                await CONN.writer.wait_closed()
-        except Exception:
-            pass
-        CONN.clear()
-        EXIT_EVENT.set()
+            try:
+                if CONN.writer:
+                    CONN.writer.close()
+                    await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+
+            sys.exit(0)
+
+        elif mtype == "ERROR":
+            print(f"[server] ERROR {msg.get('message')}")
+
 
 # ----------------- commands  -----------------
 async def cmd_connect(host: str, port: int) -> None:
