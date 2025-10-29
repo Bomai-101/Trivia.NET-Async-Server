@@ -494,40 +494,17 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
                 )
         return await asyncio.to_thread(_read)
 
-    # start stdin reader and router
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
 
-    # IMPORTANT: wrap Event.wait() into Tasks
-    t_quit = asyncio.create_task(QUIT_EVENT.wait())
-    t_exit = asyncio.create_task(EXIT_EVENT.wait())
-
-    try:
-        done, pending = await asyncio.wait(
-            {t_quit, t_exit},
-            return_when=asyncio.FIRST_COMPLETED
-        )
-    finally:
-        # cancel the other event-wait task
-        for t in (t_quit, t_exit):
-            if not t.done():
-                t.cancel()
-        for t in (t_quit, t_exit):
-            try:
-                await t
-            except Exception:
-                pass
-
-        # stop stdin/router
-        for t in (t_stdin, t_router):
-            if not t.done():
-                t.cancel()
-        for t in (t_stdin, t_router):
-            try:
-                await t
-            except Exception:
-                pass
-
+    
+    await asyncio.wait(
+        {
+            asyncio.create_task(QUIT_EVENT.wait()),
+            asyncio.create_task(EXIT_EVENT.wait()),
+        },
+        return_when=asyncio.FIRST_COMPLETED,
+    )
 
 async def main_async():
     try:
@@ -583,6 +560,8 @@ def main():
 
     try:
         asyncio.run(main_async())
+    except asyncio.CancelledError:
+        pass
     except KeyboardInterrupt:
         pass
 
