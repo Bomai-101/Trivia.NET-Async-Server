@@ -435,7 +435,7 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
-# ----------------- main logic -----------------
+# ----------------- main logic  -----------------
 async def interactive_loop() -> None:
     async def stdin_reader():
         loop = asyncio.get_running_loop()
