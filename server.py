@@ -377,7 +377,7 @@ async def broadcast(msg: Dict[str, Any]) -> None:
 # Coordinator (game flow) 
 # -------------------------------------------------------------------
 async def coordinator() -> None:
-    # Wait until enough distinct usernames have said HI
+    # Wait until enough players have sent HI
     await READY.wait()
 
     qtypes = CFG.get("question_types", []) or []
@@ -391,26 +391,26 @@ async def coordinator() -> None:
     except Exception:
         ready_info = ready_info_tpl
 
-    # Tell all connected players we're about to start
+    # Give clients time to start their read loops before READY
+    await asyncio.sleep(1.0)
+
+    # Broadcast READY message
     await broadcast({
         "message_type": "READY",
         "info": ready_info
     })
 
-    # Tiny delay so clients can print READY before first QUESTION
-    try:
-        await asyncio.sleep(1.0)
-    except Exception:
-        await asyncio.sleep(0)
+    # Give clients time to print READY before the first QUESTION
+    await asyncio.sleep(1.0)
 
     total_questions = len(qtypes)
 
     for i, qtype in enumerate(qtypes, start=1):
-        # Clear answers for this  round
+        # Clear answers for this round
         async with LOCK:
             CURRENT_ANSWERS.clear()
 
-        # Build the question text
+        # Build short question
         short_q = get_short_question_for(qtype)
 
         fmt = QUESTION_FORMATS.get(qtype)
@@ -424,7 +424,7 @@ async def coordinator() -> None:
 
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
 
-        # Broadcast the QUESTION to everyone
+        # Broadcast the QUESTION to all active players
         await broadcast({
             "message_type": "QUESTION",
             "question_type": qtype,
@@ -433,13 +433,13 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
 
-        # Give players time_limit seconds (+ a small grace) to answer
+        # Wait for answers (fixed timing)
         try:
-            await asyncio.sleep(float(qsec) + 0.3)
+            await asyncio.sleep(float(qsec) + 0.1)
         except Exception:
             await asyncio.sleep(0)
 
-        # --- First scoring pass ---
+        # Score answers once (no second pass)
         ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
         bad_tpl = CFG.get(
             "incorrect_answer",
@@ -447,112 +447,65 @@ async def coordinator() -> None:
         )
 
         correct_full = compute_correct_answer(qtype, short_q)
+        correct_str_fallback = "N/A" if correct_full is None else correct_full
 
-        # Snapshot players and answers under the lock
+        # Snapshot under lock
         async with LOCK:
             players_snapshot = list(PLAYERS.values())
             players_by_name = {p["name"]: p for p in players_snapshot}
             answers_snapshot = dict(CURRENT_ANSWERS)
 
-        # We'll track who already got a RESULT this round
-        already_resulted = set()
-
+        # Send RESULT messages and update scores
         for username, raw_ans in answers_snapshot.items():
             p = players_by_name.get(username)
             if p is None:
                 continue
 
             ans = raw_ans.strip()
-            correct_str = correct_full if correct_full is not None else "N/A"
-            ok = (correct_full is not None and ans == correct_full)
+            is_correct = (correct_full is not None and ans == correct_full)
 
-            if ok:
+            if is_correct:
                 p["score"] += 1
 
             feedback = format_feedback(
-                ok_tpl if ok else bad_tpl,
+                ok_tpl if is_correct else bad_tpl,
                 ans,
-                correct_str
+                correct_str_fallback
             )
 
-            await send_line(p["w"], {
-                "message_type": "RESULT",
-                "correct": bool(ok),
-                "feedback": feedback
-            })
+            if p["w"] is not None and p.get("active", False):
+                await send_line(p["w"], {
+                    "message_type": "RESULT",
+                    "correct": bool(is_correct),
+                    "feedback": feedback
+                })
 
-            already_resulted.add(username)
-
-        # Small pause so those RESULT lines flush before next broadcast
+        # Small delay so RESULT flushes before next broadcast
         await asyncio.sleep(0.05)
 
-        # Branch by "is this the last question?"
+        # If not last question -> send LEADERBOARD
         if i < total_questions:
-            # Not the last question:
-            # Send LEADERBOARD (every connected player gets it)
             state = build_leaderboard_state()
             await broadcast({
                 "message_type": "LEADERBOARD",
                 "state": state
             })
 
-            # Optional gap between questions
             if qgap:
                 try:
                     await asyncio.sleep(float(qgap))
                 except Exception:
                     await asyncio.sleep(0)
 
+        # If last question -> send FINISHED and end game
         else:
-            # Last question:
-            # Give a tiny extra grace window to catch any last-millisecond ANSWERs
-            try:
-                await asyncio.sleep(0.5)
-            except Exception:
-                await asyncio.sleep(0)
-
-            # Take one more snapshot of CURRENT_ANSWERS and players
-            async with LOCK:
-                players_snapshot2 = list(PLAYERS.values())
-                players_by_name2 = {p["name"]: p for p in players_snapshot2}
-                answers_snapshot2 = dict(CURRENT_ANSWERS)
-
-            # Second scoring pass ONLY for users who did NOT
-            # receive a RESULT yet in this round
-            for username, raw_ans in answers_snapshot2.items():
-                if username in already_resulted:
-                    continue  # don't double-send RESULT
-
-                p = players_by_name2.get(username)
-                if p is None:
-                    continue
-
-                ans = raw_ans.strip()
-                correct_str = correct_full if correct_full is not None else "N/A"
-                ok = (correct_full is not None and ans == correct_full)
-
-                if ok:
-                    p["score"] += 1
-
-                feedback = format_feedback(
-                    ok_tpl if ok else bad_tpl,
-                    ans,
-                    correct_str
-                )
-
-                await send_line(p["w"], {
-                    "message_type": "RESULT",
-                    "correct": bool(ok),
-                    "feedback": feedback
-                })
-            await asyncio.sleep(0.05)
-
-            # Now announce final standings to  everyone
             final_text = build_final_standings()
             await broadcast({
                 "message_type": "FINISHED",
                 "final_standings": final_text
             })
+            return
+
 
 
 # -------------------------------------------------------------------
