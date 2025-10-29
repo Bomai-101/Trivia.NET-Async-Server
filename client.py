@@ -60,7 +60,6 @@ OLLAMA_MODEL: Optional[str] = None
 EXIT_EVENT = asyncio.Event()  # server finished/disconnected
 QUIT_EVENT = asyncio.Event()  # client must terminate now
 
-# Two separate queues: one for commands, one for answers.
 COMMAND_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 ANSWER_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 
@@ -237,7 +236,6 @@ async def handle_server_messages() -> None:
                     answer_to_send = auto_answer(qtype, short_q)
 
                 else:
-                    # you-mode: read from ANSWER_QUEUE, not stdin directly
                     try:
                         raw_player = await asyncio.wait_for(
                             ANSWER_QUEUE.get(),
@@ -334,16 +332,12 @@ async def handle_command(line: str) -> None:
             QUIT_EVENT.set()
         return
 
-    # non-command lines are answers; they were already routed to ANSWER_QUEUE by the reader
-    return
-
 # ---------- stdin routing ----------
 def _is_command_line(s: str) -> bool:
     up = (s or "").strip().upper()
     return (up == "EXIT") or (up == "DISCONNECT") or up.startswith("CONNECT ")
 
 async def route_stdin_lines(lines: list[str]) -> None:
-    # push lines to the proper queue in order
     for ln in lines:
         if _is_command_line(ln):
             await COMMAND_QUEUE.put(ln)
@@ -377,11 +371,9 @@ async def main_async() -> None:
         raw_all = ""
     lines = raw_all.splitlines()
 
-    # fast path: single EXIT line exits immediately
     nonempty = [x for x in lines if x.strip() != ""]
     if len(nonempty) == 1 and nonempty[0].strip().upper() == "EXIT":
         return
-
     if not lines:
         return
 
