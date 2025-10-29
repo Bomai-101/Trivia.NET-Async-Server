@@ -436,7 +436,7 @@ async def handle_command(line: str) -> None:
         return
 
 # ----------------- main logic  -----------------
-async def interactive_loop() -> None:
+async def interactive_loop(first_line: Optional[str] = None) -> None:
     async def stdin_reader():
         loop = asyncio.get_running_loop()
         def _read():
@@ -447,9 +447,17 @@ async def interactive_loop() -> None:
                 )
         await asyncio.to_thread(_read)
 
-    asyncio.create_task(stdin_reader())
+    async def command_worker():
+        while True:
+            cmd_line = await USER_INPUT_QUEUE.get()
+            await handle_command(cmd_line)
 
-    # just wait forever (or until EXIT_EVENT is set)
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
+
+    asyncio.create_task(stdin_reader())
+    asyncio.create_task(command_worker())
+
     await EXIT_EVENT.wait()
 
 
@@ -457,21 +465,24 @@ async def interactive_loop() -> None:
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
 
-    # ---- warmup Ollama BEFORE talking to the trivia server ----
-    # CHANGED: now only one clean warmup call, no nested wait_for/timeouts.
-    #if CLIENT_MODE == "ai":
-        #await warmup_ollama()  # CHANGED
+    # if CLIENT_MODE == "ai":
+    #     await warmup_ollama()
 
-    # After warmup is fully done, THEN we proceed to read stdin and connect to server.
-    if not sys.stdin.isatty():
-        line = await asyncio.to_thread(sys.stdin.readline)
-        line = (line or "").strip()
-        if not line:
-            sys.exit(0)
-        await handle_command(line)
-        await EXIT_EVENT.wait()
+    try:
+        first_line = await asyncio.to_thread(sys.stdin.readline)
+    except Exception:
+        first_line = ""
+    first_line = (first_line or "").rstrip("\r\n")
+
+    if not first_line:
         sys.exit(0)
 
+    if first_line.strip().upper() == "EXIT":
+        await handle_command(first_line)
+        sys.exit(0)
+
+    await interactive_loop(first_line=first_line)
+    sys.exit(0)
 
 
 def load_client_config(path: Path) -> Dict[str, Any]:
