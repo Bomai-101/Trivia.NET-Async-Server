@@ -473,6 +473,7 @@ async def main_async():
         sys.exit(0)
 
 
+
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
         cfg = json.loads(path.read_text(encoding="utf-8"))
