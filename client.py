@@ -61,7 +61,8 @@ USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
-
+AWAITING_ANSWER: Optional[asyncio.Future[str]] = None
+QUIT_EVENT = asyncio.Event()
 # ----------------- auto-answer helpers -----------------
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -319,21 +320,27 @@ async def handle_server_messages() -> None:
                         })
 
                 else:
-                    # "you" mode -> wait for user stdin AT QUESTION TIME
+                    # "you" mode: wait for router-provided line instead of reading stdin here
+                    global AWAITING_ANSWER
+                    # create a one-shot future to receive exactly one answer line
+                    fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                    AWAITING_ANSWER = fut
                     try:
-                        raw = await asyncio.wait_for(
-                            asyncio.to_thread(sys.stdin.readline),
-                            timeout=float(tlimit)
-                        )
-                        ans = (raw or "").strip()
+                        ans = await asyncio.wait_for(fut, timeout=float(tlimit))
+                        ans = (ans or "").strip()
                     except asyncio.TimeoutError:
                         ans = ""
-                    dprint(f"ans: {ans!r}")
+                    finally:
+                        # clear waiting state no matter what
+                        if AWAITING_ANSWER is fut:
+                            AWAITING_ANSWER = None
+
                     if ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ans
                         })
+
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
@@ -349,6 +356,7 @@ async def handle_server_messages() -> None:
 
             elif mtype == "FINISHED":
                 print(msg.get("final_standings", ""))
+                QUIT_EVENT.set()
                 break
 
             elif mtype == "ERROR":
@@ -377,7 +385,8 @@ async def cmd_connect(host: str, port: int) -> None:
             await asyncio.sleep(0.2)
     else:
         print("Connection failed")
-        sys.exit(0)
+        QUIT_EVENT.set()
+        return
 
     CONN.reader, CONN.writer = reader, writer
     await send_line(writer, {
@@ -404,24 +413,10 @@ async def cmd_disconnect() -> None:
     #EXIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
-    cmd = line.strip()
-    up  = cmd.upper()
+    cmd = (line or "").strip()
     if not cmd:
         return
-
-    if up == "EXIT":
-        if CONN.is_connected():
-            try:
-                await send_line(CONN.writer, {"message_type": "BYE"})
-                await CONN.writer.drain()
-                CONN.writer.close()
-                await CONN.writer.wait_closed()
-            except Exception:
-                pass
-            CONN.clear()
-        await asyncio.sleep(0.05)
-        sys.exit(0)
-
+    up = cmd.upper()
 
     if up.startswith("CONNECT"):
         try:
@@ -432,34 +427,103 @@ async def handle_command(line: str) -> None:
         return
 
     if up == "DISCONNECT":
-        await cmd_disconnect()
+        if CONN.is_connected():
+            try:
+                await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
+                await CONN.writer.drain()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            try:
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+        QUIT_EVENT.set()
         return
 
-# ----------------- main logic  -----------------
+    # other text ignored here if not awaiting answer
 
+
+# ----------------- main logic  -----------------
+async def router_worker():
+    while True:
+        line = await USER_INPUT_QUEUE.get()
+        if line is None:
+            continue
+        up = line.strip().upper()
+
+        # EXIT must work at any time
+        if up == "EXIT":
+            # graceful shutdown
+            if CONN.is_connected():
+                try:
+                    await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
+                    await CONN.writer.drain()  # type: ignore[union-attr]
+                except Exception:
+                    pass
+                try:
+                    CONN.writer.close()
+                    await CONN.writer.wait_closed()
+                except Exception:
+                    pass
+                CONN.clear()
+            QUIT_EVENT.set()
+            return
+
+        # If a QUESTION in "you" mode is awaiting an answer, deliver this line as the answer
+        global AWAITING_ANSWER
+        if AWAITING_ANSWER is not None and not AWAITING_ANSWER.done():
+            AWAITING_ANSWER.set_result(line)
+            continue
+
+        # Otherwise treat it as a command (CONNECT / DISCONNECT / etc.)
+        await handle_command(line)
+
+async def interactive_loop(first_line: Optional[str] = None) -> None:
+    loop = asyncio.get_running_loop()
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
+
+    async def stdin_reader():
+        def _read():
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(
+                    USER_INPUT_QUEUE.put_nowait,
+                    line.rstrip("\r\n")
+                )
+        return await asyncio.to_thread(_read)
+
+    # start stdin reader and router
+    t1 = asyncio.create_task(stdin_reader())
+    t2 = asyncio.create_task(router_worker())
+
+    # wait for either server to finish or QUIT requested
+    done, pending = await asyncio.wait(
+        {EXIT_EVENT.wait(), QUIT_EVENT.wait()},
+        return_when=asyncio.FIRST_COMPLETED
+    )
+
+    for p in (t1, t2):
+        p.cancel()
+        try:
+            await p
+        except Exception:
+            pass
 
 
 async def main_async():
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
-        sys.exit(0)
+        first_line = ""
+    first_line = (first_line or "").rstrip("\r\n")
 
-    first_line = (first_line or "").strip()
     if not first_line:
-        sys.exit(0)
+        return
 
-    # special EXIT handling
-    if first_line.upper() == "EXIT":
-        await handle_command(first_line)
-        sys.exit(0)
+    await interactive_loop(first_line=first_line)
 
-    # normal CONNECT case
-    await handle_command(first_line)
-
-    # wait until server closes connection
-    await EXIT_EVENT.wait()
-    sys.exit(0)
 
 
 
