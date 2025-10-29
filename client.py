@@ -533,23 +533,13 @@ async def main_async():
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
-        sys.exit(0)
+        first_line = ""
 
-    first_line = (first_line or "").strip()
+    first_line = (first_line or "").rstrip("\r\n")
     if not first_line:
-        sys.exit(0)
-
-    # special EXIT handling
-    if first_line.upper() == "EXIT":
-        await handle_command(first_line)
-        sys.exit(0)
-
-    # normal CONNECT case
-    await handle_command(first_line)
-
-    # wait until server closes connection
-    await EXIT_EVENT.wait()
-    sys.exit(0)
+        return 
+    
+    await interactive_loop(first_line=first_line)
 
 
 
