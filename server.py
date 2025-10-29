@@ -391,7 +391,7 @@ async def coordinator() -> None:
     except Exception:
         ready_info = ready_info_tpl
 
-    # Give clients time to start their read loops before READY
+    # Give clients time to start  their read loops before READY
     await asyncio.sleep(1.0)
 
     # Broadcast READY message
