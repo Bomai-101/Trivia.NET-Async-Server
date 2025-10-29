@@ -1,15 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Async NDJSON client.
-
-Modes:
-  - "you": manual answers from stdin
-  - "auto": code-generated answers
-  - "ai": answers from local Ollama-like model via /api/chat
-"""
-
 import asyncio
 import requests
 import json
@@ -17,13 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# ----------------- debug toggle -----------------
 DEBUG = False
 def dprint(*args, **kwargs):
     if DEBUG:
         print(*args, **kwargs)
 
-# ----------------- utility encode/decode -----------------
 def _enc(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -40,7 +29,6 @@ async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any
     except json.JSONDecodeError:
         return {"message_type": "ERROR", "message": "invalid_json"}
 
-# ----------------- connection holder -----------------
 class Conn:
     def __init__(self) -> None:
         self.reader: Optional[asyncio.StreamReader] = None
@@ -53,16 +41,18 @@ class Conn:
 
 CONN = Conn()
 
-# ----------------- globals -----------------
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
+
 EXIT_EVENT = asyncio.Event()
 USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
 
-# ----------------- auto-answer helpers -----------------
+SHOULD_TERMINATE = False  # <- new
+
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
         "M": 1000, "CM": 900, "D": 500, "CD": 400,
@@ -152,7 +142,6 @@ def auto_answer(question_type: str, short_question: str) -> str:
         return _network_broadcast_answer(short_question)
     return ""
 
-# ----------------- ai prompt (Ollama chat-style) -----------------
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
@@ -196,17 +185,6 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | No
     result = await asyncio.to_thread(_do_request)
     return result
 
-async def warmup_ollama():
-    if not (OLLAMA_HOST and OLLAMA_PORT and OLLAMA_MODEL):
-        return
-    dprint("[warmup] starting Ollama warmup...")
-    try:
-        _ = await ask_ollama("2 + 2", "Mathematics", tlimit=2.0)
-        dprint("[warmup] warmup finished cleanly.")
-    except Exception:
-        dprint("[warmup] warmup raised exception (ignored).")
-
-# ----------------- server message loop -----------------
 async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
@@ -221,7 +199,6 @@ async def handle_server_messages() -> None:
                 dprint("[debug] server closed connection")
                 break
 
-            dprint(f"[debug rx] {msg}")
             mtype = str(msg.get("message_type", "")).upper()
 
             if mtype == "READY":
@@ -243,22 +220,18 @@ async def handle_server_messages() -> None:
                         )
                     except asyncio.TimeoutError:
                         ai_ans = None
-                        dprint(f"[debug ai timeout] after {tlimit}s")
 
                     if ai_ans is None:
                         ai_ans = ""
 
-                    dprint(f"[debug ai_ans before send] {ai_ans!r}")
                     if ai_ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
                             "answer": ai_ans
                         })
-                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
                     else:
-                        dprint("Error 404: Answer not found")
-                        dprint("[debug no ANSWER sent for this question]")
-                    dprint(f"[debug sent ANSWER {ai_ans!r}]")
+                        # nothing sent on timeout or blank
+                        pass
 
                 elif CLIENT_MODE == "auto":
                     ans = auto_answer(qtype, short_q)
@@ -282,7 +255,6 @@ async def handle_server_messages() -> None:
                         ans = (raw or "").strip()
                     except asyncio.TimeoutError:
                         ans = ""
-                    dprint(f"ans: {ans!r}")
                     if ans:
                         await send_line(writer, {
                             "message_type": "ANSWER",
@@ -293,13 +265,11 @@ async def handle_server_messages() -> None:
                 fb = msg.get("feedback", "")
                 if fb:
                     print(fb)
-                dprint(f"[debug RESULT] {msg}")
 
             elif mtype == "LEADERBOARD":
                 fb = msg.get("feedback", msg.get("state", ""))
                 if fb:
                     print(fb)
-                dprint(f"[debug LEADERBOARD] {msg}")
 
             elif mtype == "FINISHED":
                 print(msg.get("final_standings", ""))
@@ -318,8 +288,9 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-# ----------------- commands  -----------------
 async def cmd_connect(host: str, port: int) -> None:
+    global SHOULD_TERMINATE
+
     if CONN.is_connected():
         return
 
@@ -331,7 +302,8 @@ async def cmd_connect(host: str, port: int) -> None:
             await asyncio.sleep(0.2)
     else:
         print("Connection failed")
-        sys.exit(0)
+        SHOULD_TERMINATE = True
+        return
 
     CONN.reader, CONN.writer = reader, writer
     await send_line(writer, {
@@ -357,9 +329,13 @@ async def cmd_disconnect() -> None:
     CONN.clear()
 
 async def handle_command(line: str) -> None:
+    global SHOULD_TERMINATE
+
     cmd = line.strip()
     up  = cmd.upper()
     if not cmd:
+        if SHOULD_TERMINATE:
+            raise SystemExit(0)
         return
 
     if up == "EXIT":
@@ -372,8 +348,7 @@ async def handle_command(line: str) -> None:
             except Exception:
                 pass
             CONN.clear()
-        await asyncio.sleep(0.05)
-        sys.exit(0)
+        raise SystemExit(0)
 
     if up.startswith("CONNECT"):
         try:
@@ -381,13 +356,19 @@ async def handle_command(line: str) -> None:
             await cmd_connect(host, int(port_s))
         except Exception:
             print("[client] usage: CONNECT <host>:<port>")
+        if SHOULD_TERMINATE:
+            # connection failed case -> terminate now
+            raise SystemExit(0)
         return
 
     if up == "DISCONNECT":
         await cmd_disconnect()
-        return
+        # after DISCONNECT, spec says client does not continue
+        raise SystemExit(0)
 
-# ----------------- main logic  -----------------
+    if SHOULD_TERMINATE:
+        raise SystemExit(0)
+
 async def interactive_loop(first_line: Optional[str]) -> None:
     loop = asyncio.get_running_loop()
 
@@ -401,7 +382,7 @@ async def interactive_loop(first_line: Optional[str]) -> None:
                     USER_INPUT_QUEUE.put_nowait,
                     line.rstrip("\r\n")
                 )
-        await asyncio.to_thread(_read_blocking)
+        return await asyncio.to_thread(_read_blocking)
 
     async def command_worker():
         while True:
@@ -410,16 +391,31 @@ async def interactive_loop(first_line: Optional[str]) -> None:
 
     async def server_done_watcher():
         await EXIT_EVENT.wait()
-        # do not sys.exit() here; allow tester to still send EXIT after FINISHED
+        # do not auto-exit; tester may still send EXIT
 
-    await asyncio.gather(stdin_reader(), command_worker(), server_done_watcher())
+    t1 = asyncio.create_task(stdin_reader())
+    t2 = asyncio.create_task(command_worker())
+    t3 = asyncio.create_task(server_done_watcher())
+
+    done, pending = await asyncio.wait(
+        {t1, t2, t3},
+        return_when=asyncio.FIRST_EXCEPTION,
+    )
+
+    for p in pending:
+        p.cancel()
+        try:
+            await p
+        except Exception:
+            pass
+
+    for d in done:
+        exc = d.exception()
+        if exc is not None:
+            raise exc
 
 async def main_async():
     dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
-
-    # warmup is optional; you can leave it disabled if timing-sensitive
-    # if CLIENT_MODE == "ai":
-    #     await warmup_ollama()
 
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
@@ -428,11 +424,11 @@ async def main_async():
     first_line = (first_line or "").rstrip("\r\n")
 
     if not first_line:
-        sys.exit(0)
+        return
 
+    # fast path: if first command is EXIT, exit immediately
     if first_line.strip().upper() == "EXIT":
-        await handle_command(first_line)
-        sys.exit(0)
+        raise SystemExit(0)
 
     await interactive_loop(first_line)
 
@@ -476,6 +472,9 @@ def main():
 
     try:
         asyncio.run(main_async())
+    except SystemExit:
+        # clean, expected exits (EXIT / DISCONNECT / failed CONNECT)
+        pass
     except KeyboardInterrupt:
         pass
 
