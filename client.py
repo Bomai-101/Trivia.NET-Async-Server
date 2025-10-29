@@ -529,7 +529,6 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
                 pass
 
 
-
 async def main_async():
     try:
         first_line = await asyncio.to_thread(sys.stdin.readline)
