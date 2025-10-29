@@ -2,75 +2,68 @@
 # -*- coding: utf-8 -*-
 
 """
-Async NDJSON quiz server (spec-compliant, no disallowed imports).
+Async NDJSON client (spec-compliant, with debug prints).
 
-Start:
-  python server.py --config <config_path>
-
-Spec summary:
-  - Uses "message_type" everywhere
-  - READY -> info
-  - QUESTION -> trivia_question, short_question, time_limit
-  - ANSWER -> client sends once; server replies RESULT
-  - LEADERBOARD / FINISHED formatted per assignment spec
+Modes:
+  - "you": interactive
+  - "auto": bot
+  - "ai": uses local Ollama-like model via /api/chat
 """
 
 import asyncio
+import requests
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Optional
 
-import questions as qmod
+# ----------------- debug toggle -----------------
+DEBUG = False
+def dprint(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
 
-# ---------------- Global state ----------------
-PLAYERS: Dict[str, Dict[str, Any]] = {}      # pid -> {"w": writer|None, "name": str, "score": int, "active": bool}
-CURRENT_ANSWERS: Dict[str, str] = {}         # username -> last answer (this round)
-SEEN_USERS: set[str] = set()                 # usernames that have ever sent HI
+# ----------------- utility encode/decode -----------------
+def _enc(obj: Dict[str, Any]) -> bytes:
+    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
-LOCK = asyncio.Lock()
-READY = asyncio.Event()
+async def send_line(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    writer.write(_enc(obj))
+    await writer.drain()
 
-CFG: Dict[str, Any] = {}
-REQUIRED_PLAYERS: int = 2
-QUESTION_FORMATS: Dict[str, str] = {}
-
-# -------------------------------------------------------------------
-# Answer-evaluation helpers (mirrors client auto-answer logic)
-# -------------------------------------------------------------------
-
-def _eval_plus_minus(expr: str) -> str | None:
-    """
-    Evaluate simple + / - expressions with spaces, e.g. "12 + 3 - 4 + 5".
-    Return result as string, or None on failure.
-    """
-    tokens = expr.split()
-    if not tokens:
+async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
+    line = await reader.readline()
+    if not line:
         return None
     try:
-        total = int(tokens[0])
-    except Exception:
-        return None
-    i = 1
-    while i < len(tokens) - 1:
-        op = tokens[i]
-        try:
-            val = int(tokens[i + 1])
-        except Exception:
-            return None
-        if op == "+":
-            total += val
-        elif op == "-":
-            total -= val
-        else:
-            return None
-        i += 2
-    return str(total)
+        return json.loads(line.decode("utf-8"))
+    except json.JSONDecodeError:
+        return {"message_type": "ERROR", "message": "invalid_json"}
 
+# ----------------- connection holder -----------------
+class Conn:
+    def __init__(self) -> None:
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
+    def is_connected(self) -> bool:
+        return self.reader is not None and self.writer is not None
+    def clear(self) -> None:
+        self.reader = None
+        self.writer = None
+
+CONN = Conn()
+
+# ----------------- globals -----------------
+CLIENT_MODE: Optional[str] = None
+USERNAME = "player"
+EXIT_EVENT = asyncio.Event()
+USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+OLLAMA_HOST: Optional[str] = None
+OLLAMA_PORT: Optional[int] = None
+OLLAMA_MODEL: Optional[str] = None
+
+# ----------------- auto-answer helpers -----------------
 def _roman_to_int(s: str) -> int:
-    """
-    Convert a Roman numeral (supports subtractives) to integer.
-    """
     ROMAN_MAP = {
         "M": 1000, "CM": 900, "D": 500, "CD": 400,
         "C": 100, "XC": 90, "L": 50, "XL": 40,
@@ -78,7 +71,7 @@ def _roman_to_int(s: str) -> int:
     }
     i = 0
     n = 0
-    s = s.strip().upper()
+    s = (s or "").strip().upper()
     while i < len(s):
         if i + 1 < len(s) and s[i:i+2] in ROMAN_MAP:
             n += ROMAN_MAP[s[i:i+2]]
@@ -88,473 +81,447 @@ def _roman_to_int(s: str) -> int:
             i += 1
     return n
 
-def _usable_ipv4_addresses(cidr: str) -> str | None:
-    """
-    "a.b.c.d/prefix" -> usable IPv4 host count.
-    For /31 and /32 we return "0".
-    Formula: (2^(32-prefix) - 2)
-    """
+def _eval_plus_minus(expr: str) -> str:
+    tokens = (expr or "").split()
+    if not tokens:
+        return ""
     try:
-        prefix = int(cidr.split("/")[1])
+        total = int(tokens[0])
     except Exception:
-        return None
+        return ""
+    i = 1
+    while i < len(tokens) - 1:
+        op = tokens[i]
+        try:
+            val = int(tokens[i+1])
+        except Exception:
+            return ""
+        if op == "+":
+            total += val
+        elif op == "-":
+            total -= val
+        else:
+            return ""
+        i += 2
+    return str(total)
+
+def _usable_ipv4_addresses(cidr: str) -> str:
+    try:
+        prefix = int((cidr or "").split("/")[1])
+    except Exception:
+        return ""
     if prefix >= 31:
         return "0"
     host_bits = 32 - prefix
-    usable = (1 << host_bits) - 2
-    return str(usable)
+    return str((1 << host_bits) - 2)
 
-def _ip_to_int(a: int, b: int, c: int, d: int) -> int:
+def _ip_to_int(a, b, c, d):
     return ((a << 24) |
             (b << 16) |
             (c << 8)  |
             d)
 
 def _int_to_ip(n: int) -> str:
-    a = (n >> 24) & 255
-    b = (n >> 16) & 255
-    c = (n >> 8) & 255
-    d = n & 255
-    return f"{a}.{b}.{c}.{d}"
+    return f"{(n>>24)&255}.{(n>>16)&255}.{(n>>8)&255}.{n&255}"
 
-def _network_and_broadcast_pair(cidr: str) -> Tuple[str, str] | None:
-    """
-    Return (network_ip, broadcast_ip) for CIDR like "192.168.1.37/24".
-    """
+def _network_broadcast_answer(cidr: str) -> str:
     try:
-        addr_str, prefix_str = cidr.split("/")
+        addr_str, prefix_str = (cidr or "").split("/")
         prefix = int(prefix_str)
-        octets = addr_str.split(".")
-        if len(octets) != 4:
-            return None
-        a, b, c, d = [int(x) for x in octets]
+        a, b, c, d = [int(x) for x in addr_str.split(".")]
     except Exception:
-        return None
-
+        return ""
     if prefix < 0 or prefix > 32:
-        return None
+        return ""
 
     ip_int = _ip_to_int(a, b, c, d)
-
-    if prefix == 0:
-        mask = 0
-    else:
-        mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF)
-
+    mask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) if prefix > 0 else 0
     network_int = ip_int & mask
     broadcast_int = network_int | (~mask & 0xFFFFFFFF)
+    return f"{_int_to_ip(network_int)} and {_int_to_ip(broadcast_int)}"
 
-    net_ip = _int_to_ip(network_int)
-    bcast_ip = _int_to_ip(broadcast_int)
-    return (net_ip, bcast_ip)
+def auto_answer(question_type: str, short_question: str) -> str:
+    qtype = (question_type or "").strip()
+    if qtype == "Mathematics":
+        return _eval_plus_minus(short_question)
+    if qtype == "Roman Numerals":
+        return str(_roman_to_int(short_question))
+    if qtype == "Usable IP Addresses of a Subnet":
+        return _usable_ipv4_addresses(short_question)
+    if qtype == "Network and Broadcast Address of a Subnet":
+        return _network_broadcast_answer(short_question)
+    return ""
 
-def compute_correct_answer(question_type: str, short_question: str) -> str | None:
+# ----------------- ai prompt (Ollama chat-style) -----------------
+async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
     """
-    Map question_type + short_question -> canonical correct answer string.
-    Must match what the auto client would send.
+    Call the Ollama-compatible /api/chat endpoint using the requests library.
+    Return EXACTLY the model's message.content with no modification.
+    If anything fails, return None.
+
+    We run requests.post() in a worker thread so this stays awaitable.
     """
-    qt = question_type.strip()
-    if not isinstance(short_question, str) or not short_question:
+
+    if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
 
-    if qt == "Mathematics":
-        # "63 - 41 + 19 - 41 + 39" -> "39"
-        return _eval_plus_minus(short_question)
+    # Build the prompt we send to the model
+    prompt = (
+        "You are a quiz player. I will give you a question.\n"
+        "Answer with ONLY the final answer, no explanation, no extra words.\n"
+        "Do NOT say anything except the direct answer.\n"
+        f"Question type: {qtype}\n"
+        f"Question: {short_question}\n"
+        "Final answer:"
+    )
 
-    if qt == "Roman Numerals":
-        # "MCCCXLVIII" -> "1348"
-        return str(_roman_to_int(short_question))
+    # Prepare request payload following the Ollama /api/chat spec
+    req_body_obj = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "stream": False
+    }
 
-    if qt == "Usable IP Addresses of a Subnet":
-        # "192.168.1.0/24" -> "254"
-        return _usable_ipv4_addresses(short_question)
+    url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
-    if qt == "Network and Broadcast Address of a Subnet":
-        # "192.168.1.37/24" -> "192.168.1.0 and 192.168.1.255"
-        pair = _network_and_broadcast_pair(short_question)
-        if pair is None:
+    def _do_request():
+        """
+        Blocking HTTP request using requests.post.
+        This will run in a background thread via asyncio.to_thread().
+        """
+        try:
+            # timeout enforces total budget; use tlimit so we try to respect quiz time_limit
+            resp = requests.post(url, json=req_body_obj, timeout=float(tlimit))
+
+            # If server errored (non-200), treat as no answer
+            if resp.status_code != 200:
+                return None
+
+            body_json = resp.json()
+
+            # According to the Ollama /api/chat docs:
+            # {
+            #   "message": {
+            #     "role": "assistant",
+            #     "content": "the answer here"
+            #   },
+            #   ...
+            # }
+            msg_obj = body_json.get("message")
+            if isinstance(msg_obj, dict):
+                # CRITICAL RULE:
+                # DO NOT clean/strip/modify the AI answer.
+                ai_answer_raw = msg_obj.get("content", "")
+                return str(ai_answer_raw)
+
             return None
-        net_ip, bcast_ip = pair
-        return f"{net_ip} and {bcast_ip}"
+        except Exception:
+            return None
 
-    return None
+    # run the blocking request in a thread so we can await it
+    result = await asyncio.to_thread(_do_request)
 
-def format_feedback(template: str, answer: str, correct_answer: str) -> str:
+    # result is either the raw answer from Ollama or None
+    return result
+
+
+# ----------------- warmup (UPDATED)-----------------
+async def warmup_ollama():
     """
-    Fill {answer} and {correct_answer} fields in template safely.
+    Preload the Ollama model before the first real question.
+
+    CHANGED:
     """
+    if not (OLLAMA_HOST and OLLAMA_PORT and OLLAMA_MODEL):
+        return
+    dprint("[warmup] starting Ollama warmup...")
     try:
-        return template.format(answer=answer, correct_answer=correct_answer)
+        _ = await ask_ollama("2 + 2", "Mathematics", tlimit=2.0)  # CHANGED
+        dprint("[warmup] warmup finished cleanly.")
     except Exception:
-        return template
+        dprint("[warmup] warmup raised exception (ignored).")
 
-# -------------------------------------------------------------------
-# Leaderboard / standings
-# -------------------------------------------------------------------
-
-def pluralize_points(n: int) -> str:
-    singular = CFG.get("points_noun_singular", "point")
-    plural = CFG.get("points_noun_plural", "points")
-    return singular if n == 1 else plural
-
-def sorted_players() -> List[Tuple[str, int]]:
-    """
-    Return list of (name, score) for ALL players (even those who left),
-    sorted by score desc then name asc.
-    """
-    items = [(p["name"], p["score"]) for p in PLAYERS.values()]
-    items.sort(key=lambda t: (-t[1], t[0]))
-    return items
-
-def build_leaderboard_state() -> str:
-    """
-    Build string:
-    "1. Alice: 2 points\n1. Bob: 2 points\n3. Carol: 1 point"
-    Tie -> same rank number.
-    """
-    items = sorted_players()
-    lines: List[str] = []
-    rank = 0
-    prev_score = None
-    count = 0
-    for name, score in items:
-        count += 1
-        if prev_score is None or score != prev_score:
-            rank = count
-            prev_score = score
-        lines.append(f"{rank}. {name}: {score} {pluralize_points(score)}")
-    return "\n".join(lines)
-
-def build_final_standings() -> str:
-    """
-    Multiline final standings including winner line.
-    """
-    heading = CFG.get("final_standings_heading", "Final standings:")
-    one_winner_tpl = CFG.get("one_winner", "{} is the sole victor!")
-    multiple_winners_tpl = CFG.get("multiple_winners", "Say congratulations to {}!")
-
-    items = sorted_players()
-    lines = [heading]
-
-    rank = 0
-    prev_score = None
-    count = 0
-
-    top_score = items[0][1] if items else 0
-    winners: List[str] = []
-
-    for name, score in items:
-        count += 1
-        if prev_score is None or score != prev_score:
-            rank = count
-            prev_score = score
-        lines.append(f"{rank}. {name}: {score} {pluralize_points(score)}")
-        if score == top_score:
-            winners.append(name)
-
-    winners.sort()
-    if len(winners) == 1:
-        lines.append(one_winner_tpl.format(winners[0]))
-    elif len(winners) > 1:
-        lines.append(multiple_winners_tpl.format(", ".join(winners)))
-    else:
-        lines.append(one_winner_tpl.format("N/A"))
-
-    return "\n".join(lines)
-
-# -------------------------------------------------------------------
-# IO helpers
-# -------------------------------------------------------------------
-
-def enc_line(obj: Dict[str, Any]) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-
-async def send_line(w: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
-    w.write(enc_line(obj))
-    await w.drain()
-
-# -------------------------------------------------------------------
-# Question generator adapter (calls questions.py)
-# -------------------------------------------------------------------
-
-def get_short_question_for(question_type: str) -> str:
-    """
-    Use questions.py to generate the short question string.
-    We do NOT invent our own question text.
-    """
-    try:
-        if question_type == "Mathematics":
-            res = qmod.generate_mathematics_question()
-        elif question_type == "Roman Numerals":
-            res = qmod.generate_roman_numerals_question()
-        elif question_type == "Usable IP Addresses of a Subnet":
-            res = qmod.generate_usable_addresses_question()
-        elif question_type == "Network and Broadcast Address of a Subnet":
-            res = qmod.generate_network_broadcast_question()
-        else:
-            return f"[{question_type}]"
-        return str(res) if res is not None else f"[{question_type}]"
-    except Exception:
-        return f"[{question_type}]"
-
-# -------------------------------------------------------------------
-# Client handling (HI / ANSWER / BYE)
-# -------------------------------------------------------------------
-
-async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> None:
-    """
-    Each TCP client stays in here.
-    We:
-      - record them on HI
-      - store answers on ANSWER
-      - keep connection open
-    """
-    addr = w.get_extra_info("peername")
-    pid = f"{addr[0]}:{addr[1]}" if addr else "unknown"
+# ----------------- server message loop -----------------
+async def handle_server_messages() -> None:
+    assert CONN.reader and CONN.writer
+    reader, writer = CONN.reader, CONN.writer
 
     try:
         while True:
-            line = await r.readline()
-            if not line:
-                break  # disconnect
             try:
-                msg = json.loads(line.decode("utf-8"))
-            except json.JSONDecodeError:
-                continue
-
-            mtype = str(msg.get("message_type", "")).upper()
-
-            if mtype == "HI":
-                username = msg.get("username", pid)
-                async with LOCK:
-                    SEEN_USERS.add(username)
-                    PLAYERS[pid] = {"w": w, "name": username, "score": 0, "active": True}
-                    if len(SEEN_USERS) >= REQUIRED_PLAYERS:
-                        READY.set()
-
-            elif mtype == "ANSWER":
-                username = PLAYERS.get(pid, {}).get("name", pid)
-                ans = str(msg.get("answer", ""))
-                async with LOCK:
-                    CURRENT_ANSWERS[username] = ans
-
-            elif mtype == "BYE":
-                async with LOCK:
-                    if pid in PLAYERS:
-                        PLAYERS[pid]["active"] = False  
-                        PLAYERS[pid]["w"] = None      
+                msg = await read_line_json(reader)
+            except ConnectionResetError:
+                break
+            if msg is None:
+                dprint("[debug] server closed connection")
                 break
 
+            dprint(f"[debug rx] {msg}")
+            mtype = str(msg.get("message_type", "")).upper()
+
+            if mtype == "READY":
+                print(msg.get("info", ""))
+
+            elif mtype == "QUESTION":
+                trivia   = msg.get("trivia_question", "")
+                qtype    = msg.get("question_type", "")
+                short_q  = msg.get("short_question", "")
+                tlimit   = msg.get("time_limit", 0)
+
+                print(trivia)
+
+                if CLIENT_MODE == "ai":
+                    try:
+                        # Bound outer wait_for using same time limit.
+                        ai_ans = await asyncio.wait_for(
+                            ask_ollama(short_q, qtype, tlimit),
+                            timeout=float(tlimit)
+                        )
+                    except asyncio.TimeoutError:
+                        ai_ans = None
+                        dprint(f"[debug ai timeout] after {tlimit}s")
+
+                    # IMPORTANT:
+                    # We MUST forward EXACTLY what the model said.
+                    # No strip(), no removing punctuation, nothing.
+                    if ai_ans is None:
+                        ai_ans = ""
+
+                    dprint(f"[debug ai_ans before send] {ai_ans!r}")
+                    if ai_ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ai_ans
+                        })
+                        dprint(f"[debug sent ANSWER {ai_ans!r}]")
+                    else:
+                        dprint("Error 404: Answer not found")
+                        dprint("[debug no ANSWER sent for this question]")
+                    dprint(f"[debug sent ANSWER {ai_ans!r}]")
+
+                elif CLIENT_MODE == "auto":
+                    ans = auto_answer(qtype, short_q)
+                    if ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ans
+                        })
+                    else:
+                        # auto couldn't figure it out -> send empty anyway
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": "Not generated"
+                        })
+
+                else:
+                    # "you" mode -> wait for user stdin AT QUESTION TIME
+                    try:
+                        raw = await asyncio.wait_for(
+                            asyncio.to_thread(sys.stdin.readline),
+                            timeout=float(tlimit)
+                        )
+                        ans = (raw or "").strip()
+                    except asyncio.TimeoutError:
+                        ans = ""
+                    dprint(f"ans: {ans!r}")
+                    if ans:
+                        await send_line(writer, {
+                            "message_type": "ANSWER",
+                            "answer": ans
+                        })
+
+            elif mtype == "RESULT":
+                fb = msg.get("feedback", "")
+                if fb:
+                    print(fb)
+                dprint(f"[debug RESULT] {msg}")
+
+            elif mtype == "LEADERBOARD":
+                fb = msg.get("feedback", msg.get("state", ""))
+                if fb:
+                    print(fb)
+                dprint(f"[debug LEADERBOARD] {msg}")
+
+            elif mtype == "FINISHED":
+                print(msg.get("final_standings", ""))
+                break
+
+            elif mtype == "ERROR":
+                print(f"[server] ERROR {msg.get('message')}")
+
     finally:
-        async with LOCK:
-            if pid in PLAYERS:
-                PLAYERS[pid]["active"] = False
-                PLAYERS[pid]["w"] = None
         try:
-            w.close()
-            await w.wait_closed()
+            if CONN.writer:
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
         except Exception:
             pass
+        CONN.clear()
+        EXIT_EVENT.set()
 
+# ----------------- commands  -----------------
+async def cmd_connect(host: str, port: int) -> None:
+    if CONN.is_connected():
+        return
 
+    for _ in range(10):
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            break
+        except Exception:
+            await asyncio.sleep(0.2)
+    else:
+        print("Connection failed")
+        sys.exit(0)
 
-# broadcast helper for all *currently connected* players
-async def broadcast(msg: Dict[str, Any]) -> None:
-    async with LOCK:
-        targets = [p for p in PLAYERS.values() if p.get("w") is not None and p.get("active", False)]
-
-    # send to everyone  concurrently
-    tasks = []
-    for p in targets:
-        tasks.append(send_line(p["w"], msg))
-
-    # wait for all writers to flush
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-# --------------------------------------------------------------------
-# Coordinator (game flow) 
-# -------------------------------------------------------------------
-async def coordinator() -> None:
-    # Wait until enough players have sent HI
-    await READY.wait()
-
-    qtypes = CFG.get("question_types", []) or []
-    question_word = CFG.get("question_word", "Question")
-    qsec = CFG.get("question_seconds")
-    qgap = CFG.get("question_interval_seconds", 0)
-
-    ready_info_tpl = CFG.get("ready_info", "Game starts soon!")
-    try:
-        ready_info = ready_info_tpl.format(question_interval_seconds=qgap)
-    except Exception:
-        ready_info = ready_info_tpl
-
-    # Give clients time to start  their read loops before READY
-    #await asyncio.sleep(0.3)
-
-    # immediately Broadcast READY message
-    await broadcast({
-        "message_type": "READY",
-        "info": ready_info
+    CONN.reader, CONN.writer = reader, writer
+    await send_line(writer, {
+        "message_type": "HI",
+        "username": USERNAME
     })
 
-    # Give clients time to print READY before the first QUESTION
-    await asyncio.sleep(0.3)
+    asyncio.create_task(handle_server_messages())
 
-    total_questions = len(qtypes)
-
-    for i, qtype in enumerate(qtypes, start=1):
-        # Clear answers for this round
-        async with LOCK:
-            CURRENT_ANSWERS.clear()
-
-        # Build short question
-        short_q = get_short_question_for(qtype)
-
-        fmt = QUESTION_FORMATS.get(qtype)
-        if fmt:
-            try:
-                question_line = fmt.format(short_q)
-            except Exception:
-                question_line = short_q
-        else:
-            question_line = short_q
-
-        trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
-
-        # Broadcast the QUESTION to all active players
-        await broadcast({
-            "message_type": "QUESTION",
-            "question_type": qtype,
-            "trivia_question": trivia,
-            "short_question": short_q,
-            "time_limit": qsec
-        })
-
-        # Wait for answers(fixed timing)
-        try:
-            await asyncio.sleep(float(qsec))
-        except Exception:
-            await asyncio.sleep(0)
-
-        # Score answers once (no second pass)
-        ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
-        bad_tpl = CFG.get(
-            "incorrect_answer",
-            "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
-        )
-
-        correct_full = compute_correct_answer(qtype, short_q)
-        correct_str_fallback = "N/A" if correct_full is None else correct_full
-
-        # Snapshot under lock
-        async with LOCK:
-            players_snapshot = list(PLAYERS.values())
-            players_by_name = {p["name"]: p for p in players_snapshot}
-            answers_snapshot = dict(CURRENT_ANSWERS)
-
-        # Send RESULT messages and update scores
-        for username, raw_ans in answers_snapshot.items():
-            p = players_by_name.get(username)
-            if p is None:
-                continue
-
-            ans = raw_ans.strip()
-            is_correct = (correct_full is not None and ans == correct_full)
-
-            if is_correct:
-                p["score"] += 1
-
-            feedback = format_feedback(
-                ok_tpl if is_correct else bad_tpl,
-                ans,
-                correct_str_fallback
-            )
-
-            if p["w"] is not None and p.get("active", False):
-                await send_line(p["w"], {
-                    "message_type": "RESULT",
-                    "correct": bool(is_correct),
-                    "feedback": feedback
-                })
-
-        # Small delay so RESULT flushes before next broadcast
-        await asyncio.sleep(0.05)
-
-        # If not last question -> send LEADERBOARD
-        if i < total_questions:
-            state = build_leaderboard_state()
-            await broadcast({
-                "message_type": "LEADERBOARD",
-                "state": state
-            })
-
-            if qgap:
-                try:
-                    await asyncio.sleep(float(qgap))
-                except Exception:
-                    await asyncio.sleep(0)
-
-        # If last question -> send FINISHED and end game
-        else:
-            final_text = build_final_standings()
-            await broadcast({
-                "message_type": "FINISHED",
-                "final_standings": final_text
-            })
-            return
-
-
-
-# -------------------------------------------------------------------
-# Config / main
-# -------------------------------------------------------------------
-
-def load_server_config(path: Path) -> Dict[str, Any]:
+async def cmd_disconnect() -> None:
+    if not CONN.is_connected():
+        return
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
+        await CONN.writer.drain()
     except Exception:
-        return {}
+        pass
+    try:
+        CONN.writer.close()
+        await CONN.writer.wait_closed()
+    except Exception:
+        pass
+    CONN.clear()
+    #EXIT_EVENT.set()
 
-async def main() -> None:
+async def handle_command(line: str) -> None:
+    cmd = line.strip()
+    up  = cmd.upper()
+    if not cmd:
+        return
+
+    if up == "EXIT":
+        if CONN.is_connected():
+            try:
+                await send_line(CONN.writer, {"message_type": "BYE"})
+                await CONN.writer.drain()
+                CONN.writer.close()
+                await CONN.writer.wait_closed()
+            except Exception:
+                pass
+            CONN.clear()
+        await asyncio.sleep(0.05)
+        sys.exit(0)
+
+
+    if up.startswith("CONNECT"):
+        try:
+            host, port_s = cmd.split()[1].split(":")
+            await cmd_connect(host, int(port_s))
+        except Exception:
+            print("[client] usage: CONNECT <host>:<port>")
+        return
+
+    if up == "DISCONNECT":
+        await cmd_disconnect()
+        return
+
+# ----------------- main logic  -----------------
+async def interactive_loop(first_line: Optional[str] = None) -> None:
+    loop = asyncio.get_running_loop()
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
+
+    async def stdin_reader():
+        def _read():
+            for line in sys.stdin:
+                loop.call_soon_threadsafe(
+                    USER_INPUT_QUEUE.put_nowait,
+                    line.rstrip("\r\n")
+                )
+        return await asyncio.to_thread(_read)
+
+    async def command_worker():
+        while True:
+            cmd_line = await USER_INPUT_QUEUE.get()
+            await handle_command(cmd_line)
+    await asyncio.gather(stdin_reader(), command_worker())
+
+
+async def main_async():
+    dprint(f"[debug] startup mode={CLIENT_MODE} host={OLLAMA_HOST} port={(OLLAMA_PORT, OLLAMA_MODEL)} username={USERNAME}")
+
+    # if CLIENT_MODE == "ai":
+    #     await warmup_ollama()
+    
+    try:
+        first_line = await asyncio.to_thread(sys.stdin.readline)
+    except Exception:
+        first_line = ""
+    first_line = (first_line or "").rstrip("\r\n")
+
+    if not first_line:
+        sys.exit(0)
+
+    if first_line.strip().upper() == "EXIT":
+        await handle_command(first_line)
+        sys.exit(0)
+
+    await interactive_loop(first_line=first_line)
+    sys.exit(0)
+
+
+def load_client_config(path: Path) -> Dict[str, Any]:
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+        if "client_mode" not in cfg:
+            print("client.py: Missing client_mode", file=sys.stderr)
+            sys.exit(1)
+        return cfg
+    except Exception:
+        print("client.py: failed to load config", file=sys.stderr)
+        sys.exit(1)
+
+def main():
     args = sys.argv[1:]
-    # require: python server.py --config <path>
     if not args or args[0] != "--config" or len(args) < 2:
-        print("server.py: Configuration not provided", file=sys.stderr)
+        print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
     cfg_path = Path(args[1])
     if not cfg_path.exists():
-        print(f"server.py: File {cfg_path} does not exist", file=sys.stderr)
+        print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
 
-    global CFG, REQUIRED_PLAYERS, QUESTION_FORMATS
-    CFG = load_server_config(cfg_path)
-    REQUIRED_PLAYERS = int(CFG.get("players"))
-    QUESTION_FORMATS = CFG.get("question_formats", {}) or {}
+    cfg = load_client_config(cfg_path)
 
-    port = int(CFG.get("port", 5050))
+    global CLIENT_MODE, USERNAME, OLLAMA_HOST, OLLAMA_PORT, OLLAMA_MODEL
+    CLIENT_MODE = cfg.get("client_mode")
+    USERNAME    = cfg.get("username", "player")
+
+    if CLIENT_MODE == "ai":
+        ollama_cfg   = cfg.get("ollama_config", {}) or {}
+        OLLAMA_HOST  = ollama_cfg.get("ollama_host", "localhost")
+        OLLAMA_PORT  = int(ollama_cfg.get("ollama_port", 11434))
+        OLLAMA_MODEL = ollama_cfg.get("ollama_model", "mistral:latest")
+    else:
+        OLLAMA_HOST = None
+        OLLAMA_PORT = None
+        OLLAMA_MODEL = None
+
     try:
-        srv = await asyncio.start_server(handle_client, "127.0.0.1", port)
-    except OSError:
-        print(f"server.py: Binding to port {port} was unsuccessful", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"[server] i  am listening on 127.0.0.1:{port}")
-
-    # Start the coordinator  in the  background
-    asyncio.create_task(coordinator())
-
-    # Run the server forever
-    async with srv:
-        await srv.serve_forever()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except SystemExit:
-        pass
+        asyncio.run(main_async())
     except KeyboardInterrupt:
         pass
+
+if __name__ == "__main__":
+    main()
