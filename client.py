@@ -325,7 +325,7 @@ async def handle_server_messages() -> None:
                             asyncio.to_thread(sys.stdin.readline),
                             timeout=float(tlimit)
                         )
-                        ans = (raw or "").strip()
+                        ans = (raw or "")#.strip()
                     except asyncio.TimeoutError:
                         ans = ""
                     dprint(f"ans: {ans!r}")
