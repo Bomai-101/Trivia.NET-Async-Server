@@ -27,7 +27,6 @@ async def read_line_json(r: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(line.decode("utf-8"))
     except json.JSONDecodeError:
-        # spec never says we print anything for malformed, so just ignore
         return {"message_type": "ERROR", "message": "invalid_json"}
 
 class Conn:
@@ -58,12 +57,10 @@ OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
 
-EXIT_EVENT = asyncio.Event()        # set when server loop ends naturally (FINISHED or disconnect)
-QUIT_EVENT = asyncio.Event()        # set when we should terminate client program entirely
+EXIT_EVENT = asyncio.Event()  # server finished / disconnected
+QUIT_EVENT = asyncio.Event()  # client should terminate now
 
 USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
-
-# ------------------ auto mode helpers ------------------
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -154,8 +151,6 @@ def auto_answer(qtype: str, short_q: str) -> str:
         return _network_broadcast_answer(short_q)
     return ""
 
-# ------------------ ai mode helper ------------------
-
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional[str]:
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
@@ -190,7 +185,6 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
             body_json = resp.json()
             msg_obj = body_json.get("message")
             if isinstance(msg_obj, dict):
-                # must forward raw, unmodified
                 return str(msg_obj.get("content", ""))
             return None
         except Exception:
@@ -198,8 +192,6 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     result = await asyncio.to_thread(_do_request)
     return result
-
-# ------------------ server message loop ------------------
 
 async def handle_server_messages() -> None:
     assert CONN.reader and CONN.writer
@@ -209,12 +201,12 @@ async def handle_server_messages() -> None:
     try:
         while True:
             try:
-                msg = await read_line_json(reader)  # may return None on EOF
+                msg = await read_line_json(reader)
             except ConnectionResetError:
                 break
 
             if msg is None:
-                # server closed socket
+                # server closed connection
                 break
 
             mtype = str(msg.get("message_type", "")).upper()
@@ -232,7 +224,6 @@ async def handle_server_messages() -> None:
 
                 print(trivia, flush=True)
 
-                # produce an answer depending on mode
                 answer_to_send = ""
 
                 if CLIENT_MODE == "ai":
@@ -250,9 +241,6 @@ async def handle_server_messages() -> None:
                     answer_to_send = auto_answer(qtype, short_q)
 
                 else:
-                    # mode "you"
-                    # We try to get one more line from USER_INPUT_QUEUE
-                    # within time_limit seconds.
                     try:
                         raw_player = await asyncio.wait_for(
                             USER_INPUT_QUEUE.get(),
@@ -290,24 +278,19 @@ async def handle_server_messages() -> None:
                     print(f"[server] ERROR {errm}", flush=True)
 
     finally:
-        # give prints a moment, then close
+        # after FINISHED or disconnect
         await asyncio.sleep(0.05)
         await CONN.close()
         EXIT_EVENT.set()
 
-# ------------------ commands ------------------
-
-async def cmd_connect(host: str, port: int) -> bool:
-    if CONN.is_connected():
-        return True
-
+async def cmd_connect(host: str, port: int) -> None:
+    # attempt connect exactly once (spec doesn't require retries here)
     try:
         reader, writer = await asyncio.open_connection(host, port)
     except Exception:
-        # must print and request quit
         print("Connection failed", flush=True)
         QUIT_EVENT.set()
-        return False
+        return
 
     CONN.set(reader, writer)
 
@@ -316,13 +299,11 @@ async def cmd_connect(host: str, port: int) -> bool:
         "username": USERNAME
     })
 
-    # start server listener
     asyncio.create_task(handle_server_messages())
-
-    return True
 
 async def cmd_disconnect() -> None:
     if not CONN.is_connected():
+        QUIT_EVENT.set()
         return
     try:
         await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
@@ -339,7 +320,6 @@ async def handle_command(line: str) -> None:
     up = cmd.upper()
 
     if up == "EXIT":
-        # graceful quit
         if CONN.is_connected():
             try:
                 await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
@@ -351,45 +331,42 @@ async def handle_command(line: str) -> None:
         return
 
     if up.startswith("CONNECT"):
-        # format: CONNECT <host>:<port>
         parts = cmd.split()
         if len(parts) >= 2 and ":" in parts[1]:
             host, port_s = parts[1].split(":", 1)
             try:
                 port_i = int(port_s)
             except Exception:
-                # malformed, but spec doesn't say to print anything
+                # spec does not define error message for malformed connect
+                QUIT_EVENT.set()
                 return
             await cmd_connect(host, port_i)
         else:
-            # malformed connect line -> spec doesn't say to print usage
-            return
+            # malformed connect
+            QUIT_EVENT.set()
         return
 
     if up == "DISCONNECT":
         await cmd_disconnect()
         return
 
-    # any other text in "you" mode might actually be an answer,
-    # but note we also pull answers out of USER_INPUT_QUEUE inside QUESTION.
-    # To avoid double-sending, we do nothing here for random text.
-
-# ------------------ main flow ------------------
+    # any other input line: in mode "you", that line might also be intended
+    # as an answer, but QUESTION handler will itself pull from USER_INPUT_QUEUE.
+    # so we don't auto-send here.
 
 async def interactive_loop(preloaded_cmds: list[str]) -> None:
-    # preload all given stdin lines into USER_INPUT_QUEUE
+    # preload stdin lines into queue in order
     for ln in preloaded_cmds:
         await USER_INPUT_QUEUE.put(ln)
 
     async def command_worker():
         while True:
-            # if QUIT_EVENT already set, break
             if QUIT_EVENT.is_set():
                 break
+
             try:
                 cmd_line = await asyncio.wait_for(USER_INPUT_QUEUE.get(), timeout=0.05)
             except asyncio.TimeoutError:
-                # periodically check quit signals
                 continue
 
             await handle_command(cmd_line)
@@ -398,11 +375,7 @@ async def interactive_loop(preloaded_cmds: list[str]) -> None:
             if QUIT_EVENT.is_set():
                 break
 
-    # run command worker until quit, and also wait until either:
-    # - QUIT_EVENT set (EXIT / DISCONNECT / failed CONNECT)
-    # - EXIT_EVENT set (server ended game / disconnected)
     async def waiter():
-        # wait until either event is set
         await asyncio.wait(
             [QUIT_EVENT.wait(), EXIT_EVENT.wait()],
             return_when=asyncio.FIRST_COMPLETED
@@ -413,29 +386,26 @@ async def interactive_loop(preloaded_cmds: list[str]) -> None:
 async def main_async() -> None:
     dprint("[startup] main_async")
 
-    # read full stdin upfront
     try:
         raw_all = sys.stdin.read()
     except Exception:
         raw_all = ""
     lines = raw_all.splitlines()
 
-    # nothing at all? just exit quietly
     if not lines:
         return
 
-    # run interactive core
     await interactive_loop(lines)
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
         cfg = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        print("client.py: failed to load config", file=sys.stderr)
+        print("client.py: failed to load config", file=sys.stderr, flush=True)
         sys.exit(1)
 
     if "client_mode" not in cfg:
-        print("client.py: Missing client_mode", file=sys.stderr)
+        print("client.py: Missing client_mode", file=sys.stderr, flush=True)
         sys.exit(1)
 
     return cfg
@@ -443,12 +413,12 @@ def load_client_config(path: Path) -> Dict[str, Any]:
 def main():
     args = sys.argv[1:]
     if not args or args[0] != "--config" or len(args) < 2:
-        print("client.py: Configuration not provided", file=sys.stderr)
+        print("client.py: Configuration not provided", file=sys.stderr, flush=True)
         sys.exit(1)
 
     cfg_path = Path(args[1])
     if not cfg_path.exists():
-        print("client.py: Configuration not provided", file=sys.stderr)
+        print("client.py: Configuration not provided", file=sys.stderr, flush=True)
         sys.exit(1)
 
     cfg = load_client_config(cfg_path)
