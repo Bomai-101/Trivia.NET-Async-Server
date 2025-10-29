@@ -285,7 +285,8 @@ async def handle_command(line: str) -> None:
         # graceful "player quit"
         await cmd_disconnect()
         EXIT_EVENT.set()
-        return
+        await asyncio.sleep(0.05)
+        sys.exit(0)
 
     if up == "DISCONNECT":
         await cmd_disconnect()
