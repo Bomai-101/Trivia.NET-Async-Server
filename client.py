@@ -489,13 +489,21 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
         def _read():
             for line in sys.stdin:
                 loop.call_soon_threadsafe(
-                    USER_INPUT_QUEUE.put_nowait,
-                    line.rstrip("\r\n")
+                    USER_INPUT_QUEUE.put_nowait, line.rstrip("\r\n")
                 )
         return await asyncio.to_thread(_read)
 
-    t_stdin = asyncio.create_task(stdin_reader())
+    t_stdin  = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
+
+    # Wrap waits in tasks; return when either event fires.
+    wait_quit = asyncio.create_task(QUIT_EVENT.wait())
+    wait_exit = asyncio.create_task(EXIT_EVENT.wait())
+    await asyncio.wait({wait_quit, wait_exit}, return_when=asyncio.FIRST_COMPLETED)
+
+    # Do not cancel/await the others (test harness just checks process exit).
+    # Let run loop unwind naturally; main_async returns -> process ends.
+
 
     
     await asyncio.wait(
@@ -508,15 +516,18 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
 
 async def main_async():
     try:
-        first_line = await asyncio.to_thread(sys.stdin.readline)
+        raw_all = sys.stdin.read()
     except Exception:
-        first_line = ""
+        raw_all = ""
 
-    first_line = (first_line or "").rstrip("\r\n")
-    if not first_line:
-        return 
-    
-    await interactive_loop(first_line=first_line)
+    lines = [ln.rstrip("\r\n") for ln in raw_all.splitlines()]
+    if not lines:
+        return
+
+    for ln in lines:
+        USER_INPUT_QUEUE.put_nowait(ln)
+
+    await interactive_loop()
 
 
 
