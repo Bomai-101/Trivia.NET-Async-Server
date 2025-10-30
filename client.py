@@ -296,7 +296,7 @@ async def cmd_connect(host: str, port: int) -> None:
 
 async def cmd_disconnect() -> None:
     if not CONN.is_connected():
-        QUIT_EVENT.set()
+        #QUIT_EVENT.set()
         return
     try:
         await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
@@ -309,7 +309,7 @@ async def cmd_disconnect() -> None:
     except Exception:
         pass
     CONN.clear()
-    QUIT_EVENT.set()
+    #QUIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
     cmd = (line or "").strip()
@@ -338,10 +338,10 @@ async def handle_command(line: str) -> None:
                 await cmd_connect(host, int(port_s))
             except Exception:
                 print("Connection failed", flush=True)
-                QUIT_EVENT.set()
+                #QUIT_EVENT.set()
         else:
             print("[client] usage: CONNECT <host>:<port>", flush=True)
-            QUIT_EVENT.set()
+            #QUIT_EVENT.set()
         return
 
     if up == "DISCONNECT":
