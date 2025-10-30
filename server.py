@@ -24,6 +24,9 @@ CFG: Dict[str, Any] = {}
 REQUIRED_PLAYERS: int = 2
 QUESTION_FORMATS: Dict[str, str] = {}
 
+def _active_player_count() -> int:
+    return sum(1 for p in PLAYERS.values() if p.get("active", False))
+
 def _eval_plus_minus(expr: str) -> str | None:
     tokens = expr.split()
     if not tokens:
@@ -227,7 +230,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
                 async with LOCK:
                     SEEN_USERS.add(username)
                     PLAYERS[pid] = {"w": w, "name": username, "score": 0, "active": True}
-                    if len(SEEN_USERS) >= REQUIRED_PLAYERS:
+                    if _active_player_count() >= REQUIRED_PLAYERS and not READY.is_set():
                         READY.set()
             elif mtype == "ANSWER":
                 ans = str(msg.get("answer", ""))
@@ -270,7 +273,8 @@ async def score_current_round(qtype: str, short_q: str, i: int,
     while not ANSWER_QUEUE.empty():
         pid, ans = await ANSWER_QUEUE.get()
         async with LOCK:
-            CURRENT_ANSWERS[pid] = ans
+            if pid not in CURRENT_ANSWERS:
+                CURRENT_ANSWERS[pid] = ans
     async with LOCK:
         players_snapshot = dict(PLAYERS)
         answers_snapshot = dict(CURRENT_ANSWERS)
