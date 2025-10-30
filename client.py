@@ -194,36 +194,37 @@ async def handle_server_messages() -> None:
                 trivia = msg.get("trivia_question", "")
                 qtype = msg.get("question_type", "")
                 short_q = msg.get("short_question", "")
-                tlimit = msg.get("time_limit", 0)
+                tlimit = float(msg.get("time_limit", 0) or 0)
+
                 print(trivia, flush=True)
 
-                if CLIENT_MODE == "ai":
+                async def _send_auto_answer():
                     try:
-                        ai_ans = await asyncio.wait_for(
-                            ask_ollama(short_q, qtype, tlimit),
-                            timeout=float(tlimit)
-                        )
-                    except asyncio.TimeoutError:
-                        ai_ans = None
-                    if ai_ans:
-                        await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
+                        if CLIENT_MODE == "ai":
+                            try:
+                                ai_ans = await asyncio.wait_for(
+                                    ask_ollama(short_q, qtype, tlimit),
+                                    timeout=tlimit
+                                )
+                                ans = ai_ans or ""
+                            except asyncio.TimeoutError:
+                                ans = ""
+                        elif CLIENT_MODE == "auto":
+                            ans = auto_answer(qtype, short_q) or "Not generated"
+                        else:  # YOU mode
+                            try:
+                                ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
+                                ans = (ans or "").strip()
+                            except asyncio.TimeoutError:
+                                ans = ""
 
-                elif CLIENT_MODE == "auto":
-                    ans = auto_answer(qtype, short_q)
-                    if ans:
-                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-                    else:
-                        await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
+                        if ans:
+                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                    except Exception:
+                        pass
 
-                else:
-                    # YOU mode: pull from ANS_QUEUE only (no competition with command router)
-                    try:
-                        ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=float(tlimit))
-                        ans = (ans or "").strip()
-                    except asyncio.TimeoutError:
-                        ans = ""
-                    if ans:
-                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                # fire-and-forget
+                asyncio.create_task(_send_auto_answer())
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
