@@ -387,7 +387,7 @@ async def coordinator() -> None:
 
     ready_info_tpl = CFG.get("ready_info", "Game starts soon!")
     try:
-        ready_info = ready_info_tpl.format(question_interval_seconds=qgap)
+        ready_info = ready_info_tpl.format(question_interval_seconds=qgap,players=REQUIRED_PLAYERS)
     except Exception:
         ready_info = ready_info_tpl
 
