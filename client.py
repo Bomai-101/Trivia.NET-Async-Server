@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+from contextlib import suppress  # <-- added
 
 DEBUG = False
 def dprint(*args, **kwargs):
@@ -365,11 +366,10 @@ async def interactive_loop(first_line: Optional[str]) -> None:
         for t in (t_quit, t_exit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
+        # swallow CancelledError explicitly
         for t in (t_quit, t_exit, t_stdin, t_router):
-            try:
+            with suppress(asyncio.CancelledError):
                 await t
-            except Exception:
-                pass
 
 async def main_async() -> None:
     try:
@@ -380,7 +380,6 @@ async def main_async() -> None:
     if not first:
         return
     if first.upper() == "EXIT":
-        # immediate pass for the EXIT-only testcase
         return
     await interactive_loop(first)
 
