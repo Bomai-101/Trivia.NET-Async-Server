@@ -4,7 +4,7 @@
 import random
 
 def generate_mathematics_question() -> str:
-    # Build: "<n> <op> <n> [<op> <n>]..." with 1–4 operators, numbers 0–199
+    # Build: "<n> <op> <n> [<op> <n>] ..." with 1–4 operators, numbers 0–199
     op_count = random.randint(1, 4)
     s = str(random.randint(0, 100))  # first  number
     for _ in range(op_count):
