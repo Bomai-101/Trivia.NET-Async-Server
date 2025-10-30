@@ -41,22 +41,20 @@ class Conn:
         self.writer = None
 
 CONN = Conn()
+
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 
 EXIT_EVENT = asyncio.Event()
 QUIT_EVENT = asyncio.Event()
-USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+
+# NEW: split queues — commands vs answers
+CMD_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+ANS_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
-
-# --- gating for answer timing ---
-QUESTION_OPEN: bool = False
-ANSWER_SENT_THIS_ROUND: bool = False
-PENDING_ANSWER: Optional[str] = None
-# --------------------------------
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -183,7 +181,6 @@ async def handle_server_messages() -> None:
         while True:
             try:
                 msg = await read_line_json(reader)
-                dprint(f"[debug] msg:{msg}")
             except ConnectionResetError:
                 break
             if msg is None:
@@ -199,15 +196,6 @@ async def handle_server_messages() -> None:
                 short_q = msg.get("short_question", "")
                 tlimit = msg.get("time_limit", 0)
                 print(trivia, flush=True)
-
-                # open the question gate
-                global QUESTION_OPEN, ANSWER_SENT_THIS_ROUND, PENDING_ANSWER
-                QUESTION_OPEN = True
-                ANSWER_SENT_THIS_ROUND = False
-                if PENDING_ANSWER and CONN.is_connected() and CONN.writer is not None:
-                    await send_line(CONN.writer, {"message_type": "ANSWER", "answer": PENDING_ANSWER})
-                    ANSWER_SENT_THIS_ROUND = True
-                    PENDING_ANSWER = None
 
                 if CLIENT_MODE == "ai":
                     try:
@@ -228,14 +216,19 @@ async def handle_server_messages() -> None:
                         await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
 
                 else:
-                    pass  # YOU mode handled by router_worker
+                    # YOU mode: pull from ANS_QUEUE only (no competition with command router)
+                    try:
+                        ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=float(tlimit))
+                        ans = (ans or "").strip()
+                    except asyncio.TimeoutError:
+                        ans = ""
+                    if ans:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 if fb:
                     print(fb, flush=True)
-                QUESTION_OPEN = False
-                PENDING_ANSWER = None
 
             elif mtype == "LEADERBOARD":
                 fb = msg.get("feedback", msg.get("state", ""))
@@ -244,8 +237,6 @@ async def handle_server_messages() -> None:
 
             elif mtype == "FINISHED":
                 print(msg.get("final_standings", ""), flush=True)
-                QUESTION_OPEN = False
-                PENDING_ANSWER = None
                 QUIT_EVENT.set()
                 break
 
@@ -276,6 +267,7 @@ async def cmd_connect(host: str, port: int) -> None:
         print("Connection failed", flush=True)
         QUIT_EVENT.set()
         return
+
     CONN.reader, CONN.writer = reader, writer
     await send_line(writer, {"message_type": "HI", "username": USERNAME})
     asyncio.create_task(handle_server_messages())
@@ -334,43 +326,44 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
+def _is_command(text: str) -> bool:
+    t = (text or "").strip().upper()
+    if not t:
+        return False
+    if t == "EXIT" or t == "DISCONNECT":
+        return True
+    if t.startswith("CONNECT "):
+        return True
+    return False
+
+async def stdin_reader():
+    loop = asyncio.get_running_loop()
+    def _read():
+        for raw in sys.stdin:
+            line = raw.rstrip("\r\n")
+            if _is_command(line):
+                loop.call_soon_threadsafe(CMD_QUEUE.put_nowait, line)
+            else:
+                loop.call_soon_threadsafe(ANS_QUEUE.put_nowait, line)
+    return await asyncio.to_thread(_read)
+
 async def router_worker():
     while True:
-        line = await USER_INPUT_QUEUE.get()
+        line = await CMD_QUEUE.get()
         if line is None:
             continue
-        raw = (line or "").strip()
-        up = raw.upper()
-
-        if up == "EXIT" or up == "DISCONNECT" or up.startswith("CONNECT"):
-            await handle_command(raw)
-            if up == "EXIT":
-                return
-            continue
-
-        global QUESTION_OPEN, ANSWER_SENT_THIS_ROUND, PENDING_ANSWER
-        if CONN.is_connected() and CONN.writer is not None:
-            if QUESTION_OPEN and not ANSWER_SENT_THIS_ROUND:
-                try:
-                    await send_line(CONN.writer, {"message_type": "ANSWER", "answer": raw})
-                    ANSWER_SENT_THIS_ROUND = True
-                except Exception:
-                    pass
-            else:
-                PENDING_ANSWER = raw
-        else:
-            PENDING_ANSWER = raw
+        if line.strip().upper() == "EXIT":
+            await handle_command("EXIT")
+            return
+        await handle_command(line)
 
 async def interactive_loop(first_line: Optional[str]) -> None:
-    loop = asyncio.get_running_loop()
+    # prime first line
     if first_line:
-        USER_INPUT_QUEUE.put_nowait(first_line)
-
-    async def stdin_reader():
-        def _read():
-            for line in sys.stdin:
-                loop.call_soon_threadsafe(USER_INPUT_QUEUE.put_nowait, line.rstrip("\r\n"))
-        return await asyncio.to_thread(_read)
+        if _is_command(first_line):
+            CMD_QUEUE.put_nowait(first_line)
+        else:
+            ANS_QUEUE.put_nowait(first_line)
 
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
@@ -389,6 +382,7 @@ async def interactive_loop(first_line: Optional[str]) -> None:
         with suppress(asyncio.CancelledError):
             if not t_exit.done():
                 await t_exit
+        # do NOT await t_stdin/t_router to avoid EOF blocking
 
 async def main_async() -> None:
     try:
@@ -399,6 +393,9 @@ async def main_async() -> None:
     if not first:
         return
     if first.upper() == "EXIT":
+        # let router handle it after priming
+        CMD_QUEUE.put_nowait(first)
+        await interactive_loop(None)
         return
     await interactive_loop(first)
 
