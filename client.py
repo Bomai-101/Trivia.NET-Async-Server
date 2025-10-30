@@ -51,7 +51,7 @@ QUIT_EVENT = asyncio.Event()
 # NEW: split queues — commands vs answers
 CMD_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 ANS_QUEUE: asyncio.Queue[str] = asyncio.Queue()
-
+INCOMING_QUEUE: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
@@ -174,31 +174,41 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     return await asyncio.to_thread(_do_request)
 
-async def handle_server_messages() -> None:
-    assert CONN.reader and CONN.writer
-    reader, writer = CONN.reader, CONN.writer
+async def socket_reader_task(reader: asyncio.StreamReader) -> None:
+    """Keep reading from socket and put each decoded JSON into INCOMING_QUEUE."""
     try:
         while True:
-            try:
-                msg = await read_line_json(reader)
-            except ConnectionResetError:
-                break
+            msg = await read_line_json(reader)
             if msg is None:
                 break
+            await INCOMING_QUEUE.put(msg)
+    except (asyncio.CancelledError, ConnectionResetError):
+        pass
+    finally:
+        await INCOMING_QUEUE.put({"message_type": "__CLOSED__"})
 
-            mtype = str(msg.get("message_type", "")).upper()
-            if mtype == "READY":
-                print(msg.get("info", ""), flush=True)
 
-            elif mtype == "QUESTION":
-                trivia = msg.get("trivia_question", "")
-                qtype = msg.get("question_type", "")
-                short_q = msg.get("short_question", "")
-                tlimit = float(msg.get("time_limit", 0) or 0)
+async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
+    """Consume messages from INCOMING_QUEUE and handle them in order."""
+    while True:
+        msg = await INCOMING_QUEUE.get()
+        mtype = str(msg.get("message_type", "")).upper()
+        if mtype == "__CLOSED__":
+            break
 
-                print(trivia, flush=True)
+        if mtype == "READY":
+            print(msg.get("info", ""), flush=True)
 
-                async def _send_auto_answer():
+        elif mtype == "QUESTION":
+            trivia = msg.get("trivia_question", "")
+            qtype = msg.get("question_type", "")
+            short_q = msg.get("short_question", "")
+            tlimit = float(msg.get("time_limit", 0) or 0)
+            print(trivia, flush=True)
+
+            # auto/ai 
+            if CLIENT_MODE in {"auto", "ai"}:
+                async def _auto_send():
                     try:
                         if CLIENT_MODE == "ai":
                             try:
@@ -209,42 +219,53 @@ async def handle_server_messages() -> None:
                                 ans = ai_ans or ""
                             except asyncio.TimeoutError:
                                 ans = ""
-                        elif CLIENT_MODE == "auto":
+                        else:
                             ans = auto_answer(qtype, short_q) or "Not generated"
-                        else:  # YOU mode
-                            try:
-                                ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
-                                ans = (ans or "").strip()
-                            except asyncio.TimeoutError:
-                                ans = ""
-
                         if ans:
                             await send_line(writer, {"message_type": "ANSWER", "answer": ans})
                     except Exception:
                         pass
+                asyncio.create_task(_auto_send())
 
-                # fire-and-forget
-                asyncio.create_task(_send_auto_answer())
+            # you 
+            else:
+                try:
+                    ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
+                    ans = (ans or "").strip()
+                except asyncio.TimeoutError:
+                    ans = ""
+                if ans:
+                    await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
-            elif mtype == "RESULT":
-                fb = msg.get("feedback", "")
-                if fb:
-                    print(fb, flush=True)
+        elif mtype == "RESULT":
+            fb = msg.get("feedback", "")
+            if fb:
+                print(fb, flush=True)
 
-            elif mtype == "LEADERBOARD":
-                fb = msg.get("feedback", msg.get("state", ""))
-                if fb:
-                    print(fb, flush=True)
+        elif mtype == "LEADERBOARD":
+            fb = msg.get("feedback", msg.get("state", ""))
+            if fb:
+                print(fb, flush=True)
 
-            elif mtype == "FINISHED":
-                print(msg.get("final_standings", ""), flush=True)
-                QUIT_EVENT.set()
-                break
+        elif mtype == "FINISHED":
+            print(msg.get("final_standings", ""), flush=True)
+            QUIT_EVENT.set()
+            break
 
-            elif mtype == "ERROR":
-                errm = msg.get("message", "")
-                if errm:
-                    print(f"[server] ERROR {errm}", flush=True)
+        elif mtype == "ERROR":
+            errm = msg.get("message", "")
+            if errm:
+                print(f"[server] ERROR {errm}", flush=True)
+
+
+async def handle_server_messages() -> None:
+    """Spawn reader + dispatcher so reading and processing never block each other."""
+    assert CONN.reader and CONN.writer
+    reader, writer = CONN.reader, CONN.writer
+    try:
+        t_reader = asyncio.create_task(socket_reader_task(reader))
+        t_dispatcher = asyncio.create_task(message_dispatcher(writer))
+        await asyncio.wait({t_reader, t_dispatcher}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         try:
             if CONN.writer:
@@ -442,6 +463,6 @@ def main():
         asyncio.run(main_async())
     except KeyboardInterrupt:
         pass
-    
+
 if __name__ == "__main__":
     main()
