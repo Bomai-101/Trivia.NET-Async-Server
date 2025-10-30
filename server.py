@@ -230,9 +230,8 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
                     if len(SEEN_USERS) >= REQUIRED_PLAYERS:
                         READY.set()
             elif mtype == "ANSWER":
-                username = PLAYERS.get(pid, {}).get("name", pid)
                 ans = str(msg.get("answer", ""))
-                await ANSWER_QUEUE.put((username, ans))
+                await ANSWER_QUEUE.put((pid, ans))
             elif mtype == "BYE":
                 async with LOCK:
                     if pid in PLAYERS:
@@ -269,15 +268,14 @@ async def score_current_round(qtype: str, short_q: str, i: int,
     correct_full = compute_correct_answer(qtype, short_q)
     correct_str_fallback = "N/A" if correct_full is None else correct_full
     while not ANSWER_QUEUE.empty():
-        username, ans = await ANSWER_QUEUE.get()
+        pid, ans = await ANSWER_QUEUE.get()
         async with LOCK:
-            CURRENT_ANSWERS[username] = ans
+            CURRENT_ANSWERS[pid] = ans
     async with LOCK:
-        players_snapshot = list(PLAYERS.values())
-        players_by_name = {p["name"]: p for p in players_snapshot}
+        players_snapshot = dict(PLAYERS)
         answers_snapshot = dict(CURRENT_ANSWERS)
-    for username, raw_ans in answers_snapshot.items():
-        p = players_by_name.get(username)
+    for pid, raw_ans in answers_snapshot.items():
+        p = players_snapshot.get(pid)
         if p is None:
             continue
         ans = raw_ans.strip()
