@@ -360,14 +360,38 @@ def _is_command(text: str) -> bool:
 
 async def stdin_reader():
     loop = asyncio.get_running_loop()
-    def _read():
-        for raw in sys.stdin:
-            line = raw.rstrip("\r\n")
-            if _is_command(line):
-                loop.call_soon_threadsafe(CMD_QUEUE.put_nowait, line)
-            else:
-                loop.call_soon_threadsafe(ANS_QUEUE.put_nowait, line)
-    return await asyncio.to_thread(_read)
+    done_fut: asyncio.Future[None] = loop.create_future()
+
+    def on_readable():
+        line = sys.stdin.readline()
+        if line == "":
+            # EOF: stop watching
+            try:
+                loop.remove_reader(sys.stdin.fileno())
+            except Exception:
+                pass
+            if not done_fut.done():
+                done_fut.set_result(None)
+            return
+
+        line = line.rstrip("\r\n")
+        if _is_command(line):
+            CMD_QUEUE.put_nowait(line)
+        else:
+            ANS_QUEUE.put_nowait(line)
+
+    # register OS-level readable callback (Unix)
+    loop.add_reader(sys.stdin.fileno(), on_readable)
+
+    try:
+        await done_fut  # wait until EOF or we cancel this task
+    except asyncio.CancelledError:
+        # clean up the reader on cancel (e.g., after EXIT)
+        try:
+            loop.remove_reader(sys.stdin.fileno())
+        except Exception:
+            pass
+        raise
 
 async def router_worker():
     while True:
@@ -379,14 +403,8 @@ async def router_worker():
             return
         await handle_command(line)
 
-async def interactive_loop(first_line: Optional[str]) -> None:
-    # prime first line
-    if first_line:
-        if _is_command(first_line):
-            CMD_QUEUE.put_nowait(first_line)
-        else:
-            ANS_QUEUE.put_nowait(first_line)
-
+async def interactive_loop(first_line: Optional[str] = None) -> None:
+    # no priming; stdin_reader will consume all incoming lines
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
     t_quit = asyncio.create_task(QUIT_EVENT.wait())
@@ -398,28 +416,16 @@ async def interactive_loop(first_line: Optional[str]) -> None:
         for t in (t_quit, t_exit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
+        # best-effort waits; stdin_reader cancel will remove_reader and return quickly
         with suppress(asyncio.CancelledError):
             if not t_quit.done():
                 await t_quit
         with suppress(asyncio.CancelledError):
             if not t_exit.done():
                 await t_exit
-        # do NOT await t_stdin/t_router to avoid EOF blocking
 
 async def main_async() -> None:
-    try:
-        first = await asyncio.to_thread(sys.stdin.readline)
-    except Exception:
-        return
-    first = (first or "").strip()
-    if not first:
-        return
-    if first.upper() == "EXIT":
-        # let router handle it after priming
-        CMD_QUEUE.put_nowait(first)
-        await interactive_loop(None)
-        return
-    await interactive_loop(first)
+    await interactive_loop(None)
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
