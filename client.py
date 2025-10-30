@@ -404,7 +404,7 @@ async def router_worker():
         await handle_command(line)
 
 async def interactive_loop(first_line: Optional[str] = None) -> None:
-    # no priming; stdin_reader will consume all incoming lines
+    # no priming; stdin_reader  will consume all incoming lines
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
     t_quit = asyncio.create_task(QUIT_EVENT.wait())
