@@ -187,7 +187,7 @@ async def handle_server_messages() -> None:
                 break
             if msg is None:
                 break
-            dprint(f"[debug] msg:{msg}")
+
             mtype = str(msg.get("message_type", "")).upper()
             if mtype == "READY":
                 print(msg.get("info", ""), flush=True)
@@ -216,26 +216,12 @@ async def handle_server_messages() -> None:
                         await send_line(writer, {"message_type": "ANSWER", "answer": ans})
                     else:
                         await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
+
                 else:
-                    global AWAITING_ANSWER
-                    fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-                    AWAITING_ANSWER = fut
+                    # YOU mode: do not wait here; stdin is dispatched by router_worker().
+                    # Just print the question and let router_worker send whatever user types as ANSWER.
+                    pass
 
-                    # NEW: consume from buffer first if anything arrived early
-                    if INPUT_BUFFER:
-                        fut.set_result(INPUT_BUFFER.popleft())
-
-                    try:
-                        ans = await asyncio.wait_for(fut, timeout=float(tlimit))
-                        ans = (ans or "").strip()
-                    except asyncio.TimeoutError:
-                        ans = ""
-                    finally:
-                        if AWAITING_ANSWER is fut:
-                            AWAITING_ANSWER = None
-                    if ans:
-                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-            
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 if fb:
@@ -264,6 +250,7 @@ async def handle_server_messages() -> None:
             pass
         CONN.clear()
         EXIT_EVENT.set()
+
 
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
@@ -343,26 +330,30 @@ async def router_worker():
         line = await USER_INPUT_QUEUE.get()
         if line is None:
             continue
-        up = line.strip().upper()
+        raw = (line or "").strip()
+        up = raw.upper()
 
-        if up == "EXIT":
-            await handle_command("EXIT")
-            return
-
-        # NEW: if a QUESTION hasn't set AWAITING_ANSWER yet, buffer the line
-        global AWAITING_ANSWER
-        if AWAITING_ANSWER is None:
-            # only treat real commands immediately; otherwise buffer
-            if up.startswith("CONNECT") or up == "DISCONNECT":
-                await handle_command(line)
-            else:
-                INPUT_BUFFER.append(line)  # keep for the next QUESTION
+        # Commands are handled by handle_command
+        if up == "EXIT" or up == "DISCONNECT" or up.startswith("CONNECT"):
+            await handle_command(raw)
+            if up == "EXIT":
+                return
             continue
 
-        # We are awaiting an answer -> deliver it
-        if not AWAITING_ANSWER.done():
-            AWAITING_ANSWER.set_result(line)
-            continue
+        # Otherwise treat the line as an ANSWER and send to server immediately
+        if CONN.is_connected() and CONN.writer is not None:
+            try:
+                await send_line(CONN.writer, {
+                    "message_type": "ANSWER",
+                    "answer": raw
+                })
+            except Exception:
+                # ignore write errors; connection teardown handled elsewhere
+                pass
+        else:
+            # Optional: avoid silent drop when not connected
+            dprint("[debug] input ignored (not connected)")
+
 
 
 async def interactive_loop(first_line: Optional[str]) -> None:
