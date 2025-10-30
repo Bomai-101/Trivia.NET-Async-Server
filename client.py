@@ -364,13 +364,19 @@ async def interactive_loop(first_line: Optional[str]) -> None:
     try:
         await asyncio.wait({t_quit, t_exit}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in (t_quit, t_exit, t_stdin, t_router):
+        for t in (t_quit, t_exit, t_router):
             if not t.done():
                 t.cancel()
-        # swallow CancelledError explicitly
-        for t in (t_quit, t_exit, t_stdin, t_router):
+        # Await async tasks to flush cancellation
+        for t in (t_quit, t_exit, t_router):
             with suppress(asyncio.CancelledError):
                 await t
+
+        # Do not await t_stdin because it is a to_thread task that may be blocked on sys.stdin
+        if not t_stdin.done():
+            t_stdin.cancel()
+        # Intentionally not awaiting t_stdin here
+
 
 async def main_async() -> None:
     try:
