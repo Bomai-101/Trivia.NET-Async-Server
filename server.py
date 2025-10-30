@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-Async NDJSON quiz server (spec-compliant, no disallowed imports).
-"""
-
 import asyncio
 import json
 import sys
