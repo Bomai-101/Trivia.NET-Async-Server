@@ -8,10 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 from contextlib import suppress
-from collections import deque
-INPUT_BUFFER: "deque[str]" = deque()
 
-DEBUG = True
+DEBUG = False
 def dprint(*args, **kwargs):
     if DEBUG:
         print(*args, **kwargs, file=sys.stderr, flush=True)
@@ -43,7 +41,6 @@ class Conn:
         self.writer = None
 
 CONN = Conn()
-
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 
@@ -54,8 +51,6 @@ USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
-
-AWAITING_ANSWER: Optional[asyncio.Future[str]] = None
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -218,8 +213,7 @@ async def handle_server_messages() -> None:
                         await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
 
                 else:
-                    # YOU mode: do not wait here; stdin is dispatched by router_worker().
-                    # Just print the question and let router_worker send whatever user types as ANSWER.
+                    # YOU mode: stdin is dispatched by router_worker()
                     pass
 
             elif mtype == "RESULT":
@@ -251,7 +245,6 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
         return
@@ -265,7 +258,6 @@ async def cmd_connect(host: str, port: int) -> None:
         print("Connection failed", flush=True)
         QUIT_EVENT.set()
         return
-
     CONN.reader, CONN.writer = reader, writer
     await send_line(writer, {"message_type": "HI", "username": USERNAME})
     asyncio.create_task(handle_server_messages())
@@ -316,7 +308,6 @@ async def handle_command(line: str) -> None:
                 print("Connection failed", flush=True)
                 QUIT_EVENT.set()
         else:
-            # *** ADDED: invalid CONNECT syntax must also terminate ***
             print("[client] usage: CONNECT <host>:<port>", flush=True)
             QUIT_EVENT.set()
         return
@@ -333,14 +324,14 @@ async def router_worker():
         raw = (line or "").strip()
         up = raw.upper()
 
-        # Commands are handled by handle_command
+        # Commands first
         if up == "EXIT" or up == "DISCONNECT" or up.startswith("CONNECT"):
             await handle_command(raw)
             if up == "EXIT":
                 return
             continue
 
-        # Otherwise treat the line as an ANSWER and send to server immediately
+        # Otherwise treat it as an answer
         if CONN.is_connected() and CONN.writer is not None:
             try:
                 await send_line(CONN.writer, {
@@ -348,13 +339,9 @@ async def router_worker():
                     "answer": raw
                 })
             except Exception:
-                # ignore write errors; connection teardown handled elsewhere
                 pass
         else:
-            # Optional: avoid silent drop when not connected
             dprint("[debug] input ignored (not connected)")
-
-
 
 async def interactive_loop(first_line: Optional[str]) -> None:
     loop = asyncio.get_running_loop()
@@ -378,14 +365,12 @@ async def interactive_loop(first_line: Optional[str]) -> None:
         for t in (t_quit, t_exit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
-        # *** CHANGED: only await the event tasks; do NOT await t_stdin/t_router ***
         with suppress(asyncio.CancelledError):
             if not t_quit.done():
                 await t_quit
         with suppress(asyncio.CancelledError):
             if not t_exit.done():
                 await t_exit
-        # intentionally skip awaiting t_stdin and t_router to avoid EOF blocking
 
 async def main_async() -> None:
     try:
