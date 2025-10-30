@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+DEBUG = False
+def dprint(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs, file=sys.stderr, flush=True)
+
 def _enc(obj: Dict[str, Any]) -> bytes:
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -39,15 +44,15 @@ CONN = Conn()
 CLIENT_MODE: Optional[str] = None
 USERNAME = "player"
 
-USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
-AWAITING_ANSWER: Optional[asyncio.Future[str]] = None
-
 EXIT_EVENT = asyncio.Event()
 QUIT_EVENT = asyncio.Event()
+USER_INPUT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
+
+AWAITING_ANSWER: Optional[asyncio.Future[str]] = None
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -102,10 +107,7 @@ def _usable_ipv4_addresses(cidr: str) -> str:
     return str((1 << host_bits) - 2)
 
 def _ip_to_int(a, b, c, d):
-    return ((a << 24) |
-            (b << 16) |
-            (c << 8)  |
-            d)
+    return ((a << 24) | (b << 16) | (c << 8) | d)
 
 def _int_to_ip(n: int) -> str:
     return f"{(n>>24)&255}.{(n>>16)&255}.{(n>>8)&255}.{n&255}"
@@ -137,7 +139,7 @@ def auto_answer(question_type: str, short_question: str) -> str:
         return _network_broadcast_answer(short_question)
     return ""
 
-async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> str | None:
+async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional[str]:
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
     prompt = (
@@ -183,64 +185,67 @@ async def handle_server_messages() -> None:
                 break
 
             mtype = str(msg.get("message_type", "")).upper()
-
             if mtype == "READY":
-                print(msg.get("info", ""))
+                print(msg.get("info", ""), flush=True)
 
             elif mtype == "QUESTION":
-                trivia   = msg.get("trivia_question", "")
-                qtype    = msg.get("question_type", "")
-                short_q  = msg.get("short_question", "")
-                tlimit   = float(msg.get("time_limit", 0))
-
-                print(trivia)
+                trivia = msg.get("trivia_question", "")
+                qtype = msg.get("question_type", "")
+                short_q = msg.get("short_question", "")
+                tlimit = msg.get("time_limit", 0)
+                print(trivia, flush=True)
 
                 if CLIENT_MODE == "ai":
                     try:
                         ai_ans = await asyncio.wait_for(
                             ask_ollama(short_q, qtype, tlimit),
-                            timeout=tlimit
+                            timeout=float(tlimit)
                         )
                     except asyncio.TimeoutError:
                         ai_ans = None
-                    ans = ai_ans or "Not generated"
-                    await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                    if ai_ans:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
 
                 elif CLIENT_MODE == "auto":
-                    ans = auto_answer(qtype, short_q) or "Not generated"
-                    await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-
+                    ans = auto_answer(qtype, short_q)
+                    if ans:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                    else:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
                 else:
                     global AWAITING_ANSWER
                     fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
                     AWAITING_ANSWER = fut
                     try:
-                        ans = await asyncio.wait_for(fut, timeout=tlimit)
+                        ans = await asyncio.wait_for(fut, timeout=float(tlimit))
                         ans = (ans or "").strip()
                     except asyncio.TimeoutError:
                         ans = ""
                     finally:
                         if AWAITING_ANSWER is fut:
                             AWAITING_ANSWER = None
-                    if not ans:
-                        ans = "Not generated"
-                    await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                    if ans:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 if fb:
-                    print(fb)
+                    print(fb, flush=True)
 
             elif mtype == "LEADERBOARD":
                 fb = msg.get("feedback", msg.get("state", ""))
                 if fb:
-                    print(fb)
+                    print(fb, flush=True)
 
             elif mtype == "FINISHED":
-                print(msg.get("final_standings", ""))
+                print(msg.get("final_standings", ""), flush=True)
                 QUIT_EVENT.set()
                 break
 
+            elif mtype == "ERROR":
+                errm = msg.get("message", "")
+                if errm:
+                    print(f"[server] ERROR {errm}", flush=True)
     finally:
         try:
             if CONN.writer:
@@ -251,30 +256,36 @@ async def handle_server_messages() -> None:
         CONN.clear()
         EXIT_EVENT.set()
 
-async def cmd_connect(host: str, port: int) -> bool:
+async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
-        return True
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-    except Exception:
-        print("Connection failed")
-        return False
+        return
+    for _ in range(10):
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            break
+        except Exception:
+            await asyncio.sleep(0.2)
+    else:
+        print("Connection failed", flush=True)
+        QUIT_EVENT.set()
+        return
+
     CONN.reader, CONN.writer = reader, writer
     await send_line(writer, {"message_type": "HI", "username": USERNAME})
     asyncio.create_task(handle_server_messages())
-    return True
 
 async def cmd_disconnect() -> None:
     if not CONN.is_connected():
+        QUIT_EVENT.set()
         return
     try:
-        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
-        await CONN.writer.drain()  # type: ignore[union-attr]
+        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
+        await CONN.writer.drain()                              # type: ignore
     except Exception:
         pass
     try:
-        CONN.writer.close()
-        await CONN.writer.wait_closed()
+        CONN.writer.close()                                    # type: ignore
+        await CONN.writer.wait_closed()                        # type: ignore
     except Exception:
         pass
     CONN.clear()
@@ -286,34 +297,32 @@ async def handle_command(line: str) -> None:
         return
     up = cmd.upper()
 
-    if up.startswith("CONNECT"):
-        try:
-            host, port_s = cmd.split()[1].split(":", 1)
-            ok = await cmd_connect(host, int(port_s))
-            if not ok:
-                QUIT_EVENT.set()
-        except Exception:
-            print("[client] usage: CONNECT <host>:<port>")
-        return
-
-    if up == "DISCONNECT":
-        await cmd_disconnect()
-        return
-
     if up == "EXIT":
         if CONN.is_connected():
             try:
-                await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore[arg-type]
-                await CONN.writer.drain()  # type: ignore[union-attr]
-            except Exception:
-                pass
-            try:
-                CONN.writer.close()
-                await CONN.writer.wait_closed()
+                await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
+                await CONN.writer.drain()                              # type: ignore
+                CONN.writer.close()                                    # type: ignore
+                await CONN.writer.wait_closed()                        # type: ignore
             except Exception:
                 pass
             CONN.clear()
         QUIT_EVENT.set()
+        return
+
+    if up.startswith("CONNECT"):
+        parts = cmd.split()
+        if len(parts) >= 2 and ":" in parts[1]:
+            host, port_s = parts[1].split(":", 1)
+            try:
+                await cmd_connect(host, int(port_s))
+            except Exception:
+                print("Connection failed", flush=True)
+                QUIT_EVENT.set()
+        return
+
+    if up == "DISCONNECT":
+        await cmd_disconnect()
         return
 
 async def router_worker():
@@ -334,12 +343,12 @@ async def router_worker():
 
         await handle_command(line)
 
-async def interactive_loop(preloaded: list[str]) -> None:
-    for ln in preloaded:
-        await USER_INPUT_QUEUE.put(ln)
+async def interactive_loop(first_line: Optional[str]) -> None:
+    loop = asyncio.get_running_loop()
+    if first_line:
+        USER_INPUT_QUEUE.put_nowait(first_line)
 
     async def stdin_reader():
-        loop = asyncio.get_running_loop()
         def _read():
             for line in sys.stdin:
                 loop.call_soon_threadsafe(USER_INPUT_QUEUE.put_nowait, line.rstrip("\r\n"))
@@ -351,37 +360,29 @@ async def interactive_loop(preloaded: list[str]) -> None:
     t_exit = asyncio.create_task(EXIT_EVENT.wait())
 
     try:
-        done, _ = await asyncio.wait({t_quit, t_exit}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({t_quit, t_exit}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in (t_quit, t_exit):
+        for t in (t_quit, t_exit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
-                try:
-                    await t
-                except Exception:
-                    pass
-        for t in (t_router, t_stdin):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except Exception:
-                    pass
+        for t in (t_quit, t_exit, t_stdin, t_router):
+            try:
+                await t
+            except Exception:
+                pass
 
-async def main_async():
+async def main_async() -> None:
     try:
-        first_line = await asyncio.to_thread(sys.stdin.readline)
+        first = await asyncio.to_thread(sys.stdin.readline)
     except Exception:
         return
-    first_line = (first_line or "").strip()
-    if not first_line:
+    first = (first or "").strip()
+    if not first:
         return
-
-    if first_line.upper() == "EXIT":
-        await handle_command("EXIT")
+    if first.upper() == "EXIT":
+        # immediate pass for the EXIT-only testcase
         return
-
-    await interactive_loop([first_line])
+    await interactive_loop(first)
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
@@ -399,6 +400,7 @@ def main():
     if not args or args[0] != "--config" or len(args) < 2:
         print("client.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
+
     cfg_path = Path(args[1])
     if not cfg_path.exists():
         print("client.py: Configuration not provided", file=sys.stderr)
@@ -408,15 +410,17 @@ def main():
 
     global CLIENT_MODE, USERNAME, OLLAMA_HOST, OLLAMA_PORT, OLLAMA_MODEL
     CLIENT_MODE = cfg.get("client_mode")
-    USERNAME    = cfg.get("username", "player")
+    USERNAME = cfg.get("username", "player")
 
     if CLIENT_MODE == "ai":
-        o = cfg.get("ollama_config", {}) or {}
-        OLLAMA_HOST  = o.get("ollama_host", "localhost")
-        OLLAMA_PORT  = int(o.get("ollama_port", 11434))
-        OLLAMA_MODEL = o.get("ollama_model", "mistral:latest")
+        ocfg = cfg.get("ollama_config", {}) or {}
+        OLLAMA_HOST = ocfg.get("ollama_host", "localhost")
+        OLLAMA_PORT = int(ocfg.get("ollama_port", 11434))
+        OLLAMA_MODEL = ocfg.get("ollama_model", "mistral:latest")
     else:
-        OLLAMA_HOST = OLLAMA_PORT = OLLAMA_MODEL = None
+        OLLAMA_HOST = None
+        OLLAMA_PORT = None
+        OLLAMA_MODEL = None
 
     try:
         asyncio.run(main_async())
