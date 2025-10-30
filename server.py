@@ -24,6 +24,14 @@ CFG: Dict[str, Any] = {}
 REQUIRED_PLAYERS: int = 2
 QUESTION_FORMATS: Dict[str, str] = {}
 
+def _drain_answer_queue() -> None:
+    try:
+        while True:
+            ANSWER_QUEUE.get_nowait()
+            ANSWER_QUEUE.task_done()
+    except asyncio.QueueEmpty:
+        pass
+
 def _active_player_count() -> int:
     return sum(1 for p in PLAYERS.values() if p.get("active", False))
 
@@ -275,6 +283,8 @@ async def score_current_round(qtype: str, short_q: str, i: int,
         async with LOCK:
             if pid not in CURRENT_ANSWERS:
                 CURRENT_ANSWERS[pid] = ans
+        ANSWER_QUEUE.task_done()
+    _drain_answer_queue()
     async with LOCK:
         players_snapshot = dict(PLAYERS)
         answers_snapshot = dict(CURRENT_ANSWERS)
@@ -328,6 +338,7 @@ async def coordinator() -> None:
     await asyncio.sleep(0.3)
     total_questions = len(qtypes)
     for i, qtype in enumerate(qtypes, start=1):
+        _drain_answer_queue()
         async with LOCK:
             CURRENT_ANSWERS.clear()
         short_q = get_short_question_for(qtype)
