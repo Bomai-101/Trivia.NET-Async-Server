@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from contextlib import suppress  # <-- added
 
-DEBUG = False
+DEBUG = True
 def dprint(*args, **kwargs):
     if DEBUG:
         print(*args, **kwargs, file=sys.stderr, flush=True)
@@ -180,6 +180,7 @@ async def handle_server_messages() -> None:
         while True:
             try:
                 msg = await read_line_json(reader)
+                dprint(f"[debug] msg:{msg}")
             except ConnectionResetError:
                 break
             if msg is None:
