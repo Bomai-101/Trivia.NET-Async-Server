@@ -427,19 +427,8 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
 
 
 async def main_async() -> None:
-    try:
-        first = await asyncio.to_thread(sys.stdin.readline)
-    except Exception:
-        return
-    first = (first or "").strip()
-    if not first:
-        return
-    if first.upper() == "EXIT":
-        # let router handle it after priming
-        CMD_QUEUE.put_nowait(first)
-        await interactive_loop(None)
-        return
-    await interactive_loop(first)
+    await interactive_loop(None)
+
 
 def load_client_config(path: Path) -> Dict[str, Any]:
     try:
