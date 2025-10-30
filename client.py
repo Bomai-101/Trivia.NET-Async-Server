@@ -249,8 +249,8 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
 
         elif mtype == "FINISHED":
             print(msg.get("final_standings", ""), flush=True)
-            QUIT_EVENT.set()
-            break
+            #QUIT_EVENT.set()
+            #break
 
         elif mtype == "ERROR":
             errm = msg.get("message", "")
@@ -274,11 +274,13 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        EXIT_EVENT.set()
+        #EXIT_EVENT.set()
 
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
         return
+    global INCOMING_QUEUE
+    INCOMING_QUEUE = asyncio.Queue()
     for _ in range(10):
         try:
             reader, writer = await asyncio.open_connection(host, port)
