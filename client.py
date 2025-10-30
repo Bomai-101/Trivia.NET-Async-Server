@@ -7,7 +7,9 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
-from contextlib import suppress  # <-- added
+from contextlib import suppress
+from collections import deque
+INPUT_BUFFER: "deque[str]" = deque()
 
 DEBUG = True
 def dprint(*args, **kwargs):
@@ -218,6 +220,11 @@ async def handle_server_messages() -> None:
                     global AWAITING_ANSWER
                     fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
                     AWAITING_ANSWER = fut
+
+                    # NEW: consume from buffer first if anything arrived early
+                    if INPUT_BUFFER:
+                        fut.set_result(INPUT_BUFFER.popleft())
+
                     try:
                         ans = await asyncio.wait_for(fut, timeout=float(tlimit))
                         ans = (ans or "").strip()
@@ -228,7 +235,7 @@ async def handle_server_messages() -> None:
                             AWAITING_ANSWER = None
                     if ans:
                         await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-
+            
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 if fb:
@@ -321,6 +328,10 @@ async def handle_command(line: str) -> None:
             except Exception:
                 print("Connection failed", flush=True)
                 QUIT_EVENT.set()
+        else:
+            # *** ADDED: invalid CONNECT syntax must also terminate ***
+            print("[client] usage: CONNECT <host>:<port>", flush=True)
+            QUIT_EVENT.set()
         return
 
     if up == "DISCONNECT":
@@ -338,12 +349,21 @@ async def router_worker():
             await handle_command("EXIT")
             return
 
+        # NEW: if a QUESTION hasn't set AWAITING_ANSWER yet, buffer the line
         global AWAITING_ANSWER
-        if AWAITING_ANSWER is not None and not AWAITING_ANSWER.done():
+        if AWAITING_ANSWER is None:
+            # only treat real commands immediately; otherwise buffer
+            if up.startswith("CONNECT") or up == "DISCONNECT":
+                await handle_command(line)
+            else:
+                INPUT_BUFFER.append(line)  # keep for the next QUESTION
+            continue
+
+        # We are awaiting an answer -> deliver it
+        if not AWAITING_ANSWER.done():
             AWAITING_ANSWER.set_result(line)
             continue
 
-        await handle_command(line)
 
 async def interactive_loop(first_line: Optional[str]) -> None:
     loop = asyncio.get_running_loop()
@@ -364,19 +384,17 @@ async def interactive_loop(first_line: Optional[str]) -> None:
     try:
         await asyncio.wait({t_quit, t_exit}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in (t_quit, t_exit, t_router):
+        for t in (t_quit, t_exit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
-        # Await async tasks to flush cancellation
-        for t in (t_quit, t_exit, t_router):
-            with suppress(asyncio.CancelledError):
-                await t
-
-        # Do not await t_stdin because it is a to_thread task that may be blocked on sys.stdin
-        if not t_stdin.done():
-            t_stdin.cancel()
-        # Intentionally not awaiting t_stdin here
-
+        # *** CHANGED: only await the event tasks; do NOT await t_stdin/t_router ***
+        with suppress(asyncio.CancelledError):
+            if not t_quit.done():
+                await t_quit
+        with suppress(asyncio.CancelledError):
+            if not t_exit.done():
+                await t_exit
+        # intentionally skip awaiting t_stdin and t_router to avoid EOF blocking
 
 async def main_async() -> None:
     try:
