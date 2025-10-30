@@ -52,6 +52,12 @@ OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
 
+# --- gating for answer timing ---
+QUESTION_OPEN: bool = False
+ANSWER_SENT_THIS_ROUND: bool = False
+PENDING_ANSWER: Optional[str] = None
+# --------------------------------
+
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
         "M": 1000, "CM": 900, "D": 500, "CD": 400,
@@ -194,6 +200,15 @@ async def handle_server_messages() -> None:
                 tlimit = msg.get("time_limit", 0)
                 print(trivia, flush=True)
 
+                # open the question gate
+                global QUESTION_OPEN, ANSWER_SENT_THIS_ROUND, PENDING_ANSWER
+                QUESTION_OPEN = True
+                ANSWER_SENT_THIS_ROUND = False
+                if PENDING_ANSWER and CONN.is_connected() and CONN.writer is not None:
+                    await send_line(CONN.writer, {"message_type": "ANSWER", "answer": PENDING_ANSWER})
+                    ANSWER_SENT_THIS_ROUND = True
+                    PENDING_ANSWER = None
+
                 if CLIENT_MODE == "ai":
                     try:
                         ai_ans = await asyncio.wait_for(
@@ -213,13 +228,14 @@ async def handle_server_messages() -> None:
                         await send_line(writer, {"message_type": "ANSWER", "answer": "Not generated"})
 
                 else:
-                    # YOU mode: stdin is dispatched by router_worker()
-                    pass
+                    pass  # YOU mode handled by router_worker
 
             elif mtype == "RESULT":
                 fb = msg.get("feedback", "")
                 if fb:
                     print(fb, flush=True)
+                QUESTION_OPEN = False
+                PENDING_ANSWER = None
 
             elif mtype == "LEADERBOARD":
                 fb = msg.get("feedback", msg.get("state", ""))
@@ -228,6 +244,8 @@ async def handle_server_messages() -> None:
 
             elif mtype == "FINISHED":
                 print(msg.get("final_standings", ""), flush=True)
+                QUESTION_OPEN = False
+                PENDING_ANSWER = None
                 QUIT_EVENT.set()
                 break
 
@@ -324,24 +342,24 @@ async def router_worker():
         raw = (line or "").strip()
         up = raw.upper()
 
-        # Commands first
         if up == "EXIT" or up == "DISCONNECT" or up.startswith("CONNECT"):
             await handle_command(raw)
             if up == "EXIT":
                 return
             continue
 
-        # Otherwise treat it as an answer
+        global QUESTION_OPEN, ANSWER_SENT_THIS_ROUND, PENDING_ANSWER
         if CONN.is_connected() and CONN.writer is not None:
-            try:
-                await send_line(CONN.writer, {
-                    "message_type": "ANSWER",
-                    "answer": raw
-                })
-            except Exception:
-                pass
+            if QUESTION_OPEN and not ANSWER_SENT_THIS_ROUND:
+                try:
+                    await send_line(CONN.writer, {"message_type": "ANSWER", "answer": raw})
+                    ANSWER_SENT_THIS_ROUND = True
+                except Exception:
+                    pass
+            else:
+                PENDING_ANSWER = raw
         else:
-            dprint("[debug] input ignored (not connected)")
+            PENDING_ANSWER = raw
 
 async def interactive_loop(first_line: Optional[str]) -> None:
     loop = asyncio.get_running_loop()
