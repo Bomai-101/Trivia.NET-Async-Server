@@ -185,7 +185,7 @@ async def handle_server_messages() -> None:
                 break
             if msg is None:
                 break
-
+            dprint(f"[debug] msg:{msg}")
             mtype = str(msg.get("message_type", "")).upper()
             if mtype == "READY":
                 print(msg.get("info", ""), flush=True)
