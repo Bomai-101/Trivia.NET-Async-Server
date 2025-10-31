@@ -144,6 +144,7 @@ def auto_answer(question_type: str, short_question: str) -> str:
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional[str]:
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
+
     prompt = (
         "You are a quiz player. I will give you a question.\n"
         "Answer with ONLY the final answer, no explanation, no extra words.\n"
@@ -152,6 +153,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
         f"Question: {short_question}\n"
         "Final answer:"
     )
+
     req_body_obj = {
         "model": OLLAMA_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -161,18 +163,25 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     def _do_request():
         try:
-            resp = requests.post(url, json=req_body_obj, timeout=max(0.2, float(tlimit)))
+            resp = requests.post(url, json=req_body_obj,
+                                 timeout=max(1.5, float(tlimit) + 0.5))
             if resp.status_code != 200:
                 return None
-            body_json = resp.json()
-            msg_obj = body_json.get("message")
-            if isinstance(msg_obj, dict):
-                return str(msg_obj.get("content", ""))
+            body = resp.json()
+
+            if isinstance(body.get("message"), dict):
+                return body["message"].get("content", "")
+
+            msgs = body.get("messages")
+            if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
+                return msgs[-1].get("content", "")
+
             return None
         except Exception:
             return None
 
     return await asyncio.to_thread(_do_request)
+
 
 async def socket_reader_task(reader: asyncio.StreamReader) -> None:
     """Keep reading from socket and put each decoded JSON into INCOMING_QUEUE."""
