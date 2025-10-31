@@ -216,13 +216,13 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                                     ask_ollama(short_q, qtype, tlimit),
                                     timeout=tlimit
                                 )
-                                ans = ai_ans or ""
+                                ans = ai_ans# or ""
                             except asyncio.TimeoutError:
                                 ans = ""
                         else:
-                            ans = auto_answer(qtype, short_q) or "Not generated"
-                        if ans:
-                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                            ans = auto_answer(qtype, short_q)# or "Not generated"
+                        #if ans:
+                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
                     except Exception:
                         pass
                 asyncio.create_task(_auto_send())
