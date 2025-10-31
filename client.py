@@ -227,6 +227,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
 
             # auto/ai 
             if CLIENT_MODE in {"auto", "ai"}:
+                global CURRENT_ANSWER_TASK
                 async def _auto_send():
                     global HAS_ANSWERED_THIS_ROUND
                     try:
@@ -253,7 +254,6 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                     except Exception:
                         pass
 
-                global CURRENT_ANSWER_TASK
                 CURRENT_ANSWER_TASK = asyncio.create_task(_auto_send())
 
 
