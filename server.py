@@ -19,6 +19,9 @@ READY = asyncio.Event()
 CFG: Dict[str, Any] = {}
 REQUIRED_PLAYERS: int = 2
 QUESTION_FORMATS: Dict[str, str] = {}
+CURRENT_QTYPE: str | None = None
+CURRENT_SHORT_Q: str | None = None
+ROUND_OPEN: bool = False
 
 def _drain_answer_queue() -> None:
     try:
@@ -237,8 +240,48 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
                     if _active_player_count() >= REQUIRED_PLAYERS and not READY.is_set():
                         READY.set()
             elif mtype == "ANSWER":
-                ans = str(msg.get("answer", ""))
-                await ANSWER_QUEUE.put((pid, ans))
+                ans_raw = str(msg.get("answer", ""))
+                ans = ans_raw.strip()
+
+                async with LOCK:
+                    qtype_now = CURRENT_QTYPE
+                    short_q_now = CURRENT_SHORT_Q
+                    round_open = ROUND_OPEN
+                    p = PLAYERS.get(pid)
+
+                    correct_full = compute_correct_answer(qtype_now or "", short_q_now or "")
+                    correct_str_fallback = "N/A" if correct_full is None else correct_full
+
+                    is_correct_now = (correct_full is not None and ans == correct_full)
+
+                    is_first_answer = (pid not in CURRENT_ANSWERS)
+
+                    if is_first_answer:
+                        CURRENT_ANSWERS[pid] = ans_raw
+
+                    if round_open and is_first_answer and is_correct_now and p is not None:
+                        p["score"] = p.get("score", 0) + 1
+
+                    ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
+                    bad_tpl = CFG.get(
+                        "incorrect_answer",
+                        "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
+                    )
+                    feedback = format_feedback(
+                        ok_tpl if is_correct_now else bad_tpl,
+                        ans,
+                        correct_str_fallback
+                    )
+
+                    w_target = p.get("w") if p else None
+
+                if w_target is not None:
+                    await send_line(w_target, {
+                        "message_type": "RESULT",
+                        "correct": bool(is_correct_now),
+                        "feedback": feedback
+                    })
+
             elif mtype == "BYE":
                 async with LOCK:
                     if pid in PLAYERS:
@@ -267,42 +310,6 @@ async def broadcast(msg: Dict[str, Any]) -> None:
 
 async def score_current_round(qtype: str, short_q: str, i: int,
                               total_questions: int, qgap: float) -> None:
-    ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
-    bad_tpl = CFG.get(
-        "incorrect_answer",
-        "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
-    )
-    correct_full = compute_correct_answer(qtype, short_q)
-    correct_str_fallback = "N/A" if correct_full is None else correct_full
-    while not ANSWER_QUEUE.empty():
-        pid, ans = await ANSWER_QUEUE.get()
-        async with LOCK:
-            if pid not in CURRENT_ANSWERS:
-                CURRENT_ANSWERS[pid] = ans
-        ANSWER_QUEUE.task_done()
-    _drain_answer_queue()
-    async with LOCK:
-        players_snapshot = dict(PLAYERS)
-        answers_snapshot = dict(CURRENT_ANSWERS)
-    for pid, raw_ans in answers_snapshot.items():
-        p = players_snapshot.get(pid)
-        if p is None:
-            continue
-        ans = raw_ans.strip()
-        is_correct = (correct_full is not None and ans == correct_full)
-        if is_correct:
-            p["score"] += 1
-        feedback = format_feedback(
-            ok_tpl if is_correct else bad_tpl,
-            ans,
-            correct_str_fallback
-        )
-        if p["w"] is not None and p.get("active", False):
-            await send_line(p["w"], {
-                "message_type": "RESULT",
-                "correct": bool(is_correct),
-                "feedback": feedback
-            })
     await asyncio.sleep(0.05)
     if i < total_questions:
         state = build_leaderboard_state()
@@ -318,6 +325,7 @@ async def score_current_round(qtype: str, short_q: str, i: int,
             "message_type": "FINISHED",
             "final_standings": final_text
         })
+
 
 async def coordinator() -> None:
     await READY.wait()
@@ -341,7 +349,11 @@ async def coordinator() -> None:
         _drain_answer_queue()
         async with LOCK:
             CURRENT_ANSWERS.clear()
-        short_q = get_short_question_for(qtype)
+            global CURRENT_QTYPE, CURRENT_SHORT_Q, ROUND_OPEN
+            CURRENT_QTYPE = qtype
+            CURRENT_SHORT_Q = get_short_question_for(qtype)
+            ROUND_OPEN = True
+        short_q = CURRENT_SHORT_Q
         fmt = QUESTION_FORMATS.get(qtype)
         if fmt:
             try:
@@ -359,6 +371,8 @@ async def coordinator() -> None:
             "time_limit": qsec
         })
         await asyncio.sleep(float(qsec))
+        async with LOCK:
+            ROUND_OPEN = False
         await score_current_round(qtype, short_q, i, total_questions, qgap)
 
 def load_server_config(path: Path) -> Dict[str, Any]:
