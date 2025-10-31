@@ -167,7 +167,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
             #print(f"resp.status_code: {resp.status_code}")
             if resp.status_code != 200:
                 return None
-            # print(f"resp:{resp}")
+            #print(f"resp:{resp}")
             body = resp.json()
             # print(f"body:{body}")
             if isinstance(body.get("message"), dict):
