@@ -217,17 +217,15 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             short_q = msg.get("short_question", "")
             tlimit = float(msg.get("time_limit", 0) or 0)
 
-            global LAST_Q_TOKEN, HAS_ANSWERED_THIS_ROUND
+            global LAST_Q_TOKEN, HAS_ANSWERED_THIS_ROUND,CURRENT_ANSWER_TASK
             LAST_Q_TOKEN = (short_q, tlimit)
             HAS_ANSWERED_THIS_ROUND = False
-            global CURRENT_ANSWER_TASK
             CURRENT_ANSWER_TASK = None
             
             print(trivia, flush=True)
 
             # auto/ai 
             if CLIENT_MODE in {"auto", "ai"}:
-                global CURRENT_ANSWER_TASK
                 async def _auto_send():
                     global HAS_ANSWERED_THIS_ROUND
                     try:
