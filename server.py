@@ -9,6 +9,7 @@ import questions as qmod
 PLAYERS: Dict[str, Dict[str, Any]] = {}
 CURRENT_ANSWERS: Dict[str, str] = {}
 SEEN_USERS: set[str] = set()
+ANSWER_QUEUE: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
 
 LOCK = asyncio.Lock()
 READY = asyncio.Event()
@@ -19,6 +20,16 @@ QUESTION_FORMATS: Dict[str, str] = {}
 CURRENT_QTYPE: str | None = None
 CURRENT_SHORT_Q: str | None = None
 ROUND_OPEN: bool = False
+
+
+def _drain_answer_queue() -> None:
+    """Clear any remaining items in ANSWER_QUEUE."""
+    try:
+        while True:
+            ANSWER_QUEUE.get_nowait()
+            ANSWER_QUEUE.task_done()
+    except asyncio.QueueEmpty:
+        pass
 
 
 def _active_player_count() -> int:
@@ -268,6 +279,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
 
             elif mtype == "ANSWER":
                 ans_raw = str(msg.get("answer", ""))
+                ans = ans_raw.strip()
 
                 async with LOCK:
                     qtype_now = CURRENT_QTYPE
@@ -277,29 +289,27 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
 
                     correct_full = compute_correct_answer(qtype_now or "", short_q_now or "")
                     correct_str_fallback = "N/A" if correct_full is None else correct_full
-                    is_correct_now = (correct_full is not None and ans_raw == correct_full)
+                    is_correct_now = (correct_full is not None and ans == correct_full)
                     is_first_answer = (pid not in CURRENT_ANSWERS)
 
                     if is_first_answer:
                         CURRENT_ANSWERS[pid] = ans_raw
 
-                    if round_open and is_first_answer and p is not None:
-                        if is_correct_now:
-                            p["score"] = p.get("score", 0) + 1
+                    if round_open and is_first_answer and is_correct_now and p is not None:
+                        p["score"] = p.get("score", 0) + 1
 
-                        ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
-                        bad_tpl = CFG.get(
-                            "incorrect_answer",
-                            "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
-                        )
-                        feedback = format_feedback(
-                            ok_tpl if is_correct_now else bad_tpl,
-                            ans_raw,
-                            correct_str_fallback
-                        )
-                        w_target = p.get("w")
-                    else:
-                        w_target = None
+                    ok_tpl = CFG.get("correct_answer", "{answer} is correct!")
+                    bad_tpl = CFG.get(
+                        "incorrect_answer",
+                        "The correct answer is {correct_answer}, but your answer {answer} is incorrect :("
+                    )
+                    feedback = format_feedback(
+                        ok_tpl if is_correct_now else bad_tpl,
+                        ans,
+                        correct_str_fallback
+                    )
+
+                    w_target = p.get("w") if p else None
 
                 if w_target is not None:
                     await send_line(w_target, {
@@ -360,10 +370,12 @@ async def score_current_round(qtype: str, short_q: str, i: int, total_questions:
 async def coordinator() -> None:
     """Main quiz loop: wait for ready, then iterate questions and timing."""
     await READY.wait()
+
     qtypes = CFG.get("question_types", []) or []
     question_word = CFG.get("question_word", "Question")
     qsec = CFG.get("question_seconds")
     qgap = CFG.get("question_interval_seconds", 0)
+
     ready_info_tpl = CFG.get("ready_info", "Game starts soon!")
     try:
         ready_info = ready_info_tpl.format(
@@ -373,16 +385,22 @@ async def coordinator() -> None:
         )
     except Exception:
         ready_info = ready_info_tpl
+
     await broadcast({"message_type": "READY", "info": ready_info})
     await asyncio.sleep(0.5)
+
     total_questions = len(qtypes)
+
     for i, qtype in enumerate(qtypes, start=1):
+        _drain_answer_queue()
+
         async with LOCK:
             CURRENT_ANSWERS.clear()
             global CURRENT_QTYPE, CURRENT_SHORT_Q, ROUND_OPEN
             CURRENT_QTYPE = qtype
             CURRENT_SHORT_Q = get_short_question_for(qtype)
             ROUND_OPEN = True
+
         short_q = CURRENT_SHORT_Q
         fmt = QUESTION_FORMATS.get(qtype)
         if fmt:
@@ -392,7 +410,9 @@ async def coordinator() -> None:
                 question_line = short_q
         else:
             question_line = short_q
+
         trivia = f"{question_word} {i} ({qtype}):\n{question_line}"
+
         await broadcast({
             "message_type": "QUESTION",
             "question_type": qtype,
@@ -400,9 +420,12 @@ async def coordinator() -> None:
             "short_question": short_q,
             "time_limit": qsec
         })
+
         await asyncio.sleep(float(qsec))
+
         async with LOCK:
             ROUND_OPEN = False
+
         await score_current_round(qtype, short_q, i, total_questions, qgap)
 
 
@@ -420,22 +443,28 @@ async def main() -> None:
     if not args or args[0] != "--config" or len(args) < 2:
         print("server.py: Configuration not provided", file=sys.stderr)
         sys.exit(1)
+
     cfg_path = Path(args[1])
     if not cfg_path.exists():
         print(f"server.py: File {cfg_path} does not exist", file=sys.stderr)
         sys.exit(1)
+
     global CFG, REQUIRED_PLAYERS, QUESTION_FORMATS
     CFG = load_server_config(cfg_path)
     REQUIRED_PLAYERS = int(CFG.get("players"))
     QUESTION_FORMATS = CFG.get("question_formats", {}) or {}
+
     port = int(CFG.get("port", 5050))
     try:
         srv = await asyncio.start_server(handle_client, "127.0.0.1", port)
     except OSError:
         print(f"server.py: Binding to port {port} was unsuccessful", file=sys.stderr)
         sys.exit(1)
+
     print(f"[server] listening on 127.0.0.1:{port}")
+
     asyncio.create_task(coordinator())
+
     async with srv:
         await srv.serve_forever()
 
