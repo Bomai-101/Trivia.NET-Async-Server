@@ -229,7 +229,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                     try:
                         if HAS_ANSWERED_THIS_ROUND:
                             return
-
+                        
                         if CLIENT_MODE == "ai":
                             try:
                                 ai_ans = await asyncio.wait_for(
@@ -239,16 +239,20 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                                 ans = ai_ans
                             except asyncio.TimeoutError:
                                 ans = None
+                                    
+                            if ai_ans is not None:
+                                await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
+                                HAS_ANSWERED_THIS_ROUND = True
+                            return
+                        
                         else:
-                            ans = auto_answer(qtype, short_q)
-
-                        if ans is not None:
-                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-                            HAS_ANSWERED_THIS_ROUND = True
+                            ans = auto_answer(qtype, short_q)# or "Not generated"
+                            if ans:
+                                await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                                HAS_ANSWERED_THIS_ROUND = True
                     except Exception:
                         pass
                 asyncio.create_task(_auto_send())
-
 
             # you 
             else:
