@@ -238,6 +238,7 @@ async def handle_client(r: asyncio.StreamReader, w: asyncio.StreamWriter) -> Non
                     SEEN_USERS.add(username)
                     PLAYERS[pid] = {"w": w, "name": username, "score": 0, "active": True}
                     if _active_player_count() >= REQUIRED_PLAYERS and not READY.is_set():
+                        asyncio.sleep(0.5)
                         READY.set()
             elif mtype == "ANSWER":
                 ans_raw = str(msg.get("answer", ""))
