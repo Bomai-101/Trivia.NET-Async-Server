@@ -169,7 +169,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
                 return None
             #print(f"resp:{resp}")
             body = resp.json()
-            print(f"body:{body}")
+            #print(f"body:{body}")
             if isinstance(body.get("message"), dict):
                 return body["message"].get("content", "")
             msgs = body.get("messages")
