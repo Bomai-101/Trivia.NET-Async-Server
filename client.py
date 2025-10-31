@@ -55,6 +55,8 @@ INCOMING_QUEUE: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
+LAST_Q_TOKEN: Optional[tuple[str, float]] = None  # (short_q, time_limit)
+HAS_ANSWERED_THIS_ROUND: bool = False
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -213,12 +215,21 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             qtype = msg.get("question_type", "")
             short_q = msg.get("short_question", "")
             tlimit = float(msg.get("time_limit", 0) or 0)
+
+            global LAST_Q_TOKEN, HAS_ANSWERED_THIS_ROUND
+            LAST_Q_TOKEN = (short_q, tlimit)
+            HAS_ANSWERED_THIS_ROUND = False
+            
             print(trivia, flush=True)
 
             # auto/ai 
             if CLIENT_MODE in {"auto", "ai"}:
                 async def _auto_send():
+                    global HAS_ANSWERED_THIS_ROUND
                     try:
+                        if HAS_ANSWERED_THIS_ROUND:
+                            return
+                        
                         if CLIENT_MODE == "ai":
                             try:
                                 ai_ans = await asyncio.wait_for(
@@ -231,11 +242,13 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                                     
                             if ai_ans is not None:
                                 await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
+                                HAS_ANSWERED_THIS_ROUND = True
                             return
                         
                         ans = auto_answer(qtype, short_q)# or "Not generated"
                         if ans:
                             await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                            HAS_ANSWERED_THIS_ROUND = True
                     except Exception:
                         pass
                 asyncio.create_task(_auto_send())
