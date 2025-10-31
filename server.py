@@ -288,7 +288,7 @@ async def score_current_round(qtype: str, short_q: str, i: int,
         p = players_snapshot.get(pid)
         if p is None:
             continue
-        ans = raw_ans#.strip()
+        ans = raw_ans.strip()
         is_correct = (correct_full is not None and ans == correct_full)
         if is_correct:
             p["score"] += 1
