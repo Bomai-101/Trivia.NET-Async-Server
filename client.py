@@ -57,6 +57,7 @@ OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
 LAST_Q_TOKEN: Optional[tuple[str, float]] = None  # (short_q, time_limit)
 HAS_ANSWERED_THIS_ROUND: bool = False
+CURRENT_ANSWER_TASK: Optional[asyncio.Task] = None
 
 def _roman_to_int(s: str) -> int:
     ROMAN_MAP = {
@@ -219,6 +220,8 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             global LAST_Q_TOKEN, HAS_ANSWERED_THIS_ROUND
             LAST_Q_TOKEN = (short_q, tlimit)
             HAS_ANSWERED_THIS_ROUND = False
+            global CURRENT_ANSWER_TASK
+            CURRENT_ANSWER_TASK = None
             
             print(trivia, flush=True)
 
@@ -227,32 +230,32 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                 async def _auto_send():
                     global HAS_ANSWERED_THIS_ROUND
                     try:
+                        if QUIT_EVENT.is_set() or not CONN.is_connected():
+                            return
                         if HAS_ANSWERED_THIS_ROUND:
                             return
-                        
+
                         if CLIENT_MODE == "ai":
                             try:
                                 ai_ans = await asyncio.wait_for(
                                     ask_ollama(short_q, qtype, tlimit),
                                     timeout=tlimit
                                 )
-                                ans = ai_ans
+                                ans = ai_ans 
                             except asyncio.TimeoutError:
                                 ans = None
-                                    
-                            if ai_ans is not None:
-                                await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
-                                HAS_ANSWERED_THIS_ROUND = True
-                            return
-                        
                         else:
-                            ans = auto_answer(qtype, short_q)# or "Not generated"
-                            if ans:
-                                await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-                                HAS_ANSWERED_THIS_ROUND = True
+                            ans = auto_answer(qtype, short_q)
+
+                        if (ans is not None) and CONN.is_connected() and (not QUIT_EVENT.is_set()):
+                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                            HAS_ANSWERED_THIS_ROUND = True
                     except Exception:
                         pass
-                asyncio.create_task(_auto_send())
+
+                global CURRENT_ANSWER_TASK
+                CURRENT_ANSWER_TASK = asyncio.create_task(_auto_send())
+
 
             # you 
             else:
@@ -324,6 +327,13 @@ async def cmd_connect(host: str, port: int) -> None:
     asyncio.create_task(handle_server_messages())
 
 async def cmd_disconnect() -> None:
+    global CURRENT_ANSWER_TASK
+    if CURRENT_ANSWER_TASK is not None and (not CURRENT_ANSWER_TASK.done()):
+        CURRENT_ANSWER_TASK.cancel()
+        with suppress(Exception):
+            await CURRENT_ANSWER_TASK
+    CURRENT_ANSWER_TASK = None
+
     if not CONN.is_connected():
         #QUIT_EVENT.set()
         return
@@ -347,6 +357,12 @@ async def handle_command(line: str) -> None:
     up = cmd.upper()
 
     if up == "EXIT":
+        global CURRENT_ANSWER_TASK
+        if CURRENT_ANSWER_TASK is not None and (not CURRENT_ANSWER_TASK.done()):
+            CURRENT_ANSWER_TASK.cancel()
+            with suppress(Exception):
+                await CURRENT_ANSWER_TASK
+        CURRENT_ANSWER_TASK = None
         if CONN.is_connected():
             try:
                 await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
