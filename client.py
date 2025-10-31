@@ -259,7 +259,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             else:
                 try:
                     ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
-                    ans = (ans or "").strip()
+                    ans = (ans or "")#.strip()
                 except asyncio.TimeoutError:
                     ans = ""
                 if ans:
