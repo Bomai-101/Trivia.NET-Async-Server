@@ -48,15 +48,14 @@ USERNAME = "player"
 EXIT_EVENT = asyncio.Event()
 QUIT_EVENT = asyncio.Event()
 
-# NEW: split queues — commands vs answers
 CMD_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 ANS_QUEUE: asyncio.Queue[str] = asyncio.Queue()
 INCOMING_QUEUE: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+
 OLLAMA_HOST: Optional[str] = None
 OLLAMA_PORT: Optional[int] = None
 OLLAMA_MODEL: Optional[str] = None
-LAST_Q_TOKEN: Optional[tuple[str, float]] = None  # (short_q, time_limit)
-HAS_ANSWERED_THIS_ROUND: bool = False
+
 CURRENT_ANSWER_TASK: Optional[asyncio.Task] = None
 
 def _roman_to_int(s: str) -> int:
@@ -167,12 +166,9 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
     def _do_request():
         try:
             resp = requests.post(url, json=req_body_obj, timeout=max(1.5, float(tlimit) + 0.5))
-            #print(f"resp.status_code: {resp.status_code}")
             if resp.status_code != 200:
                 return None
-            #print(f"resp:{resp}")
             body = resp.json()
-            # print(f"body:{body}")
             if isinstance(body.get("message"), dict):
                 return body["message"].get("content", "")
             msgs = body.get("messages")
@@ -184,10 +180,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     return await asyncio.to_thread(_do_request)
 
-
-
 async def socket_reader_task(reader: asyncio.StreamReader) -> None:
-    """Keep reading from socket and put each decoded JSON into INCOMING_QUEUE."""
     try:
         while True:
             msg = await read_line_json(reader)
@@ -199,9 +192,16 @@ async def socket_reader_task(reader: asyncio.StreamReader) -> None:
     finally:
         await INCOMING_QUEUE.put({"message_type": "__CLOSED__"})
 
+def _drain_ans_queue() -> None:
+    try:
+        while True:
+            ANS_QUEUE.get_nowait()
+            ANS_QUEUE.task_done()
+    except asyncio.QueueEmpty:
+        pass
 
 async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
-    """Consume messages from INCOMING_QUEUE and handle them in order."""
+    global CURRENT_ANSWER_TASK
     while True:
         msg = await INCOMING_QUEUE.get()
         mtype = str(msg.get("message_type", "")).upper()
@@ -216,53 +216,44 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             qtype = msg.get("question_type", "")
             short_q = msg.get("short_question", "")
             tlimit = float(msg.get("time_limit", 0) or 0)
-
-            global LAST_Q_TOKEN, HAS_ANSWERED_THIS_ROUND,CURRENT_ANSWER_TASK
-            LAST_Q_TOKEN = (short_q, tlimit)
-            HAS_ANSWERED_THIS_ROUND = False
-            CURRENT_ANSWER_TASK = None
-            
             print(trivia, flush=True)
 
-            # auto/ai 
+            if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
+                CURRENT_ANSWER_TASK.cancel()
+            CURRENT_ANSWER_TASK = None
+
             if CLIENT_MODE in {"auto", "ai"}:
                 async def _auto_send():
-                    global HAS_ANSWERED_THIS_ROUND
                     try:
                         if QUIT_EVENT.is_set() or not CONN.is_connected():
                             return
-                        if HAS_ANSWERED_THIS_ROUND:
-                            return
-
                         if CLIENT_MODE == "ai":
                             try:
                                 ai_ans = await asyncio.wait_for(
                                     ask_ollama(short_q, qtype, tlimit),
                                     timeout=tlimit
                                 )
-                                ans = ai_ans 
                             except asyncio.TimeoutError:
-                                ans = None
-                        else:
-                            ans = auto_answer(qtype, short_q)
-
-                        if (ans is not None) and CONN.is_connected() and (not QUIT_EVENT.is_set()):
+                                ai_ans = None
+                            if ai_ans is not None and CONN.is_connected() and not QUIT_EVENT.is_set():
+                                await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
+                            return
+                        # auto mode
+                        ans = auto_answer(qtype, short_q)
+                        if CONN.is_connected() and not QUIT_EVENT.is_set():
                             await send_line(writer, {"message_type": "ANSWER", "answer": ans})
-                            HAS_ANSWERED_THIS_ROUND = True
                     except Exception:
                         pass
 
                 CURRENT_ANSWER_TASK = asyncio.create_task(_auto_send())
 
-
-            # you 
             else:
+                _drain_ans_queue()
                 try:
                     ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
-                    ans = (ans or "")#.strip()
                 except asyncio.TimeoutError:
                     ans = ""
-                if ans:
+                if CONN.is_connected():
                     await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
         elif mtype == "RESULT":
@@ -277,17 +268,13 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
 
         elif mtype == "FINISHED":
             print(msg.get("final_standings", ""), flush=True)
-            #QUIT_EVENT.set()
-            #break
 
         elif mtype == "ERROR":
             errm = msg.get("message", "")
             if errm:
                 print(f"[server] ERROR {errm}", flush=True)
 
-
 async def handle_server_messages() -> None:
-    """Spawn reader + dispatcher so reading and processing never block each other."""
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
     try:
@@ -302,7 +289,6 @@ async def handle_server_messages() -> None:
         except Exception:
             pass
         CONN.clear()
-        #EXIT_EVENT.set()
 
 async def cmd_connect(host: str, port: int) -> None:
     if CONN.is_connected():
@@ -326,14 +312,9 @@ async def cmd_connect(host: str, port: int) -> None:
 
 async def cmd_disconnect() -> None:
     global CURRENT_ANSWER_TASK
-    if CURRENT_ANSWER_TASK is not None and (not CURRENT_ANSWER_TASK.done()):
+    if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
         CURRENT_ANSWER_TASK.cancel()
-        with suppress(Exception):
-            await CURRENT_ANSWER_TASK
-    CURRENT_ANSWER_TASK = None
-
     if not CONN.is_connected():
-        #QUIT_EVENT.set()
         return
     try:
         await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
@@ -346,21 +327,17 @@ async def cmd_disconnect() -> None:
     except Exception:
         pass
     CONN.clear()
-    #QUIT_EVENT.set()
 
 async def handle_command(line: str) -> None:
+    global CURRENT_ANSWER_TASK
     cmd = (line or "").strip()
     if not cmd:
         return
     up = cmd.upper()
 
     if up == "EXIT":
-        global CURRENT_ANSWER_TASK
-        if CURRENT_ANSWER_TASK is not None and (not CURRENT_ANSWER_TASK.done()):
+        if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
             CURRENT_ANSWER_TASK.cancel()
-            with suppress(Exception):
-                await CURRENT_ANSWER_TASK
-        CURRENT_ANSWER_TASK = None
         if CONN.is_connected():
             try:
                 await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
@@ -381,10 +358,8 @@ async def handle_command(line: str) -> None:
                 await cmd_connect(host, int(port_s))
             except Exception:
                 print("Connection failed", flush=True)
-                #QUIT_EVENT.set()
         else:
             print("[client] usage: CONNECT <host>:<port>", flush=True)
-            #QUIT_EVENT.set()
         return
 
     if up == "DISCONNECT":
@@ -408,7 +383,6 @@ async def stdin_reader():
     def on_readable():
         line = sys.stdin.readline()
         if line == "":
-            # EOF: stop watching
             try:
                 loop.remove_reader(sys.stdin.fileno())
             except Exception:
@@ -423,13 +397,11 @@ async def stdin_reader():
         else:
             ANS_QUEUE.put_nowait(line)
 
-    # register OS-level readable callback (Unix)
     loop.add_reader(sys.stdin.fileno(), on_readable)
 
     try:
-        await done_fut  # wait until EOF or we cancel this task
+        await done_fut
     except asyncio.CancelledError:
-        # clean up the reader on cancel (e.g., after EXIT)
         try:
             loop.remove_reader(sys.stdin.fileno())
         except Exception:
@@ -447,25 +419,19 @@ async def router_worker():
         await handle_command(line)
 
 async def interactive_loop(first_line: Optional[str] = None) -> None:
-    # no priming; stdin_reader  will consume all incoming lines
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
     t_quit = asyncio.create_task(QUIT_EVENT.wait())
-    t_exit = asyncio.create_task(EXIT_EVENT.wait())
 
     try:
-        await asyncio.wait({t_quit, t_exit}, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({t_quit}, return_when=asyncio.FIRST_COMPLETED)
     finally:
-        for t in (t_quit, t_exit, t_stdin, t_router):
+        for t in (t_quit, t_stdin, t_router):
             if not t.done():
                 t.cancel()
-        # best-effort waits; stdin_reader cancel will remove_reader and return quickly
         with suppress(asyncio.CancelledError):
             if not t_quit.done():
                 await t_quit
-        with suppress(asyncio.CancelledError):
-            if not t_exit.done():
-                await t_exit
 
 async def main_async() -> None:
     await interactive_loop(None)
