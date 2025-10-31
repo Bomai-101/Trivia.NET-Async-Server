@@ -428,6 +428,24 @@ async def main() -> None:
     CFG = load_server_config(cfg_path)
     REQUIRED_PLAYERS = int(CFG.get("players"))
     QUESTION_FORMATS = CFG.get("question_formats", {}) or {}
+    def format_cfg_value(k, v):
+        if not isinstance(v, str):
+            return v
+        if k in (
+            "question_word",
+            "points_noun_singular",
+            "points_noun_plural"
+        ):
+            return v
+        if k == "question_formats":
+            return v
+        try:
+            return v.format(**CFG)
+        except Exception:
+            return v
+
+    for key, val in list(CFG.items()):
+        CFG[key] = format_cfg_value(key, val)
     port = int(CFG.get("port", 5050))
     try:
         srv = await asyncio.start_server(handle_client, "127.0.0.1", port)
