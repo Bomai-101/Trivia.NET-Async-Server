@@ -343,7 +343,7 @@ async def coordinator() -> None:
     except Exception:
         ready_info = ready_info_tpl
     await broadcast({"message_type": "READY", "info": ready_info})
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.5)
     total_questions = len(qtypes)
     for i, qtype in enumerate(qtypes, start=1):
         _drain_answer_queue()
