@@ -437,7 +437,11 @@ async def main() -> None:
         if k in (
             "question_word",
             "points_noun_singular",
-            "points_noun_plural"
+            "points_noun_plural",
+            "question_formats",
+            "one_winner",
+            "multiple_winners",
+            "final_standings_heading",
         ):
             return v
         if k == "question_formats":
