@@ -447,7 +447,6 @@ async def main() -> None:
     for key, val in list(CFG.items()):
         CFG[key] = format_cfg_value(key, val)
 
-        
     port = int(CFG.get("port", 5050))
     try:
         srv = await asyncio.start_server(handle_client, "127.0.0.1", port)
