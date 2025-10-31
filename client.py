@@ -221,7 +221,8 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                                 ans = ""
                         else:
                             ans = auto_answer(qtype, short_q) or "Not generated"
-                        await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                        if ans:
+                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
                     except Exception:
                         pass
                 asyncio.create_task(_auto_send())
