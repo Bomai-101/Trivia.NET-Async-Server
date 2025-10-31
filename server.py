@@ -400,7 +400,10 @@ async def coordinator() -> None:
             "short_question": short_q,
             "time_limit": qsec
         })
-        await asyncio.sleep(float(qsec))
+        try:
+            await asyncio.sleep(float(qsec))
+        except Exception:
+            await asyncio.sleep(0)
         async with LOCK:
             ROUND_OPEN = False
         await score_current_round(qtype, short_q, i, total_questions, qgap)
