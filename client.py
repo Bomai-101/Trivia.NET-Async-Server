@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import asyncio
 import requests
 import json
@@ -9,19 +6,29 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from contextlib import suppress
 
+
 DEBUG = False
+
+
 def dprint(*args, **kwargs):
+    """Optional debug printer to stderr when DEBUG is True."""
     if DEBUG:
         print(*args, **kwargs, file=sys.stderr, flush=True)
 
+
 def _enc(obj: Dict[str, Any]) -> bytes:
+    """Encode a JSON-serializable object as UTF-8 NDJSON line."""
     return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
 
+
 async def send_line(writer: asyncio.StreamWriter, obj: Dict[str, Any]) -> None:
+    """Send one NDJSON line to the server and drain the writer."""
     writer.write(_enc(obj))
     await writer.drain()
 
+
 async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any]]:
+    """Read one NDJSON line and parse as JSON; return None on EOF."""
     line = await reader.readline()
     if not line:
         return None
@@ -30,15 +37,23 @@ async def read_line_json(reader: asyncio.StreamReader) -> Optional[Dict[str, Any
     except json.JSONDecodeError:
         return {"message_type": "ERROR", "message": "invalid_json"}
 
+
 class Conn:
+    """Holds the current socket connection state."""
+
     def __init__(self) -> None:
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
+
     def is_connected(self) -> bool:
+        """Return True if both reader and writer are present."""
         return self.reader is not None and self.writer is not None
+
     def clear(self) -> None:
+        """Clear reader and writer to represent a disconnected state."""
         self.reader = None
         self.writer = None
+
 
 CONN = Conn()
 
@@ -58,7 +73,9 @@ OLLAMA_MODEL: Optional[str] = None
 
 CURRENT_ANSWER_TASK: Optional[asyncio.Task] = None
 
+
 def _roman_to_int(s: str) -> int:
+    """Convert a Roman numeral string to its integer value."""
     ROMAN_MAP = {
         "M": 1000, "CM": 900, "D": 500, "CD": 400,
         "C": 100, "XC": 90, "L": 50, "XL": 40,
@@ -76,7 +93,9 @@ def _roman_to_int(s: str) -> int:
             i += 1
     return n
 
+
 def _eval_plus_minus(expr: str) -> str:
+    """Evaluate a simple space-delimited + / - expression; return result as string."""
     tokens = (expr or "").split()
     if not tokens:
         return ""
@@ -100,7 +119,9 @@ def _eval_plus_minus(expr: str) -> str:
         i += 2
     return str(total)
 
+
 def _usable_ipv4_addresses(cidr: str) -> str:
+    """Compute usable host addresses for a CIDR (return '0' for /31 or /32)."""
     try:
         prefix = int((cidr or "").split("/")[1])
     except Exception:
@@ -110,13 +131,19 @@ def _usable_ipv4_addresses(cidr: str) -> str:
     host_bits = 32 - prefix
     return str((1 << host_bits) - 2)
 
+
 def _ip_to_int(a, b, c, d):
+    """Pack 4 octets into a 32-bit integer."""
     return ((a << 24) | (b << 16) | (c << 8) | d)
 
+
 def _int_to_ip(n: int) -> str:
+    """Unpack a 32-bit integer into dotted-quad IPv4 string."""
     return f"{(n>>24)&255}.{(n>>16)&255}.{(n>>8)&255}.{n&255}"
 
+
 def _network_broadcast_answer(cidr: str) -> str:
+    """Compute 'network and broadcast' IPv4 for a given CIDR string."""
     try:
         addr_str, prefix_str = (cidr or "").split("/")
         prefix = int(prefix_str)
@@ -131,7 +158,9 @@ def _network_broadcast_answer(cidr: str) -> str:
     broadcast_int = network_int | (~mask & 0xFFFFFFFF)
     return f"{_int_to_ip(network_int)} and {_int_to_ip(broadcast_int)}"
 
+
 def auto_answer(question_type: str, short_question: str) -> str:
+    """Deterministic solver for known question types; may return empty string."""
     qtype = (question_type or "").strip()
     if qtype == "Mathematics":
         return _eval_plus_minus(short_question)
@@ -143,7 +172,9 @@ def auto_answer(question_type: str, short_question: str) -> str:
         return _network_broadcast_answer(short_question)
     return ""
 
+
 async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional[str]:
+    """Query Ollama using /api/chat and return the model's raw content string or None."""
     if OLLAMA_HOST is None or OLLAMA_PORT is None or OLLAMA_MODEL is None:
         return None
 
@@ -161,6 +192,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
         "messages": [{"role": "user", "content": prompt}],
         "stream": False
     }
+
     url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
     def _do_request():
@@ -180,7 +212,9 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     return await asyncio.to_thread(_do_request)
 
+
 async def socket_reader_task(reader: asyncio.StreamReader) -> None:
+    """Read messages from the socket and push them into INCOMING_QUEUE."""
     try:
         while True:
             msg = await read_line_json(reader)
@@ -192,7 +226,9 @@ async def socket_reader_task(reader: asyncio.StreamReader) -> None:
     finally:
         await INCOMING_QUEUE.put({"message_type": "__CLOSED__"})
 
+
 def _drain_ans_queue() -> None:
+    """Empty any pending user answers from ANS_QUEUE."""
     try:
         while True:
             ANS_QUEUE.get_nowait()
@@ -200,11 +236,15 @@ def _drain_ans_queue() -> None:
     except asyncio.QueueEmpty:
         pass
 
+
 async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
+    """Consume messages from INCOMING_QUEUE and react according to message_type."""
     global CURRENT_ANSWER_TASK
+
     while True:
         msg = await INCOMING_QUEUE.get()
         mtype = str(msg.get("message_type", "")).upper()
+
         if mtype == "__CLOSED__":
             break
 
@@ -218,28 +258,20 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             tlimit = float(msg.get("time_limit", 0) or 0)
             print(trivia, flush=True)
 
-            # cancel previous answer task (if any)
-            global CURRENT_ANSWER_TASK
             if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
                 CURRENT_ANSWER_TASK.cancel()
             CURRENT_ANSWER_TASK = None
 
-            # small helper
             async def _submit(ans: Optional[str]) -> None:
+                """Send ANSWER if ans is not None, connection is active, and quitting is not set."""
                 if ans is None:
                     return
                 if not CONN.is_connected() or QUIT_EVENT.is_set():
                     return
                 await send_line(writer, {"message_type": "ANSWER", "answer": ans})
 
-            # drain old answers for YOU mode so commentary doesn't leak
-            def _drain_ans_queue() -> None:
-                try:
-                    while True:
-                        ANS_QUEUE.get_nowait()
-                        ANS_QUEUE.task_done()
-                except asyncio.QueueEmpty:
-                    pass
+            def _drain_local() -> None:
+                _drain_ans_queue()
 
             if CLIENT_MODE == "ai":
                 async def _ai_send():
@@ -250,7 +282,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                         )
                     except asyncio.TimeoutError:
                         ai_ans = None
-                    await _submit(ai_ans)  # send exactly what Ollama returned; None means don't send
+                    await _submit(ai_ans)
                 CURRENT_ANSWER_TASK = asyncio.create_task(_ai_send())
 
             elif CLIENT_MODE == "auto":
@@ -259,21 +291,19 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
                         ans = auto_answer(qtype, short_q)
                     except Exception:
                         ans = ""
-                    await _submit(ans)  # always send (even empty string)
+                    await _submit(ans)
                 CURRENT_ANSWER_TASK = asyncio.create_task(_auto_send())
 
-            else:  # YOU mode
-                _drain_ans_queue()
+            else:
+                _drain_local()
+
                 async def _you_send():
                     try:
-                        # get exactly one line within tlimit; empty string is a valid answer and must be sent
                         ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
                         await _submit(ans)
                     except asyncio.TimeoutError:
-                        # no answer within time window -> do not send anything
                         return
                 CURRENT_ANSWER_TASK = asyncio.create_task(_you_send())
-
 
         elif mtype == "RESULT":
             fb = msg.get("feedback", "")
@@ -293,7 +323,9 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             if errm:
                 print(f"[server] ERROR {errm}", flush=True)
 
+
 async def handle_server_messages() -> None:
+    """Start socket reader and message dispatcher; exit when either completes."""
     assert CONN.reader and CONN.writer
     reader, writer = CONN.reader, CONN.writer
     try:
@@ -309,11 +341,15 @@ async def handle_server_messages() -> None:
             pass
         CONN.clear()
 
+
 async def cmd_connect(host: str, port: int) -> None:
+    """Open a TCP connection, send HI, and start message handling."""
     if CONN.is_connected():
         return
+
     global INCOMING_QUEUE
     INCOMING_QUEUE = asyncio.Queue()
+
     for _ in range(10):
         try:
             reader, writer = await asyncio.open_connection(host, port)
@@ -329,29 +365,40 @@ async def cmd_connect(host: str, port: int) -> None:
     await send_line(writer, {"message_type": "HI", "username": USERNAME})
     asyncio.create_task(handle_server_messages())
 
+
 async def cmd_disconnect() -> None:
+    """Politely disconnect from the server and cancel any answer task."""
     global CURRENT_ANSWER_TASK
+
     if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
         CURRENT_ANSWER_TASK.cancel()
+
     if not CONN.is_connected():
         return
+
     try:
-        await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
-        await CONN.writer.drain()                              # type: ignore
+        await send_line(CONN.writer, {"message_type": "BYE"})  
+        await CONN.writer.drain()                              
     except Exception:
         pass
+
     try:
-        CONN.writer.close()                                    # type: ignore
-        await CONN.writer.wait_closed()                        # type: ignore
+        CONN.writer.close()                                    
+        await CONN.writer.wait_closed()                        
     except Exception:
         pass
+
     CONN.clear()
 
+
 async def handle_command(line: str) -> None:
+    """Dispatch a single stdin command like CONNECT, DISCONNECT, or EXIT."""
     global CURRENT_ANSWER_TASK
+
     cmd = (line or "").strip()
     if not cmd:
         return
+
     up = cmd.upper()
 
     if up == "EXIT":
@@ -359,10 +406,10 @@ async def handle_command(line: str) -> None:
             CURRENT_ANSWER_TASK.cancel()
         if CONN.is_connected():
             try:
-                await send_line(CONN.writer, {"message_type": "BYE"})  # type: ignore
-                await CONN.writer.drain()                              # type: ignore
-                CONN.writer.close()                                    # type: ignore
-                await CONN.writer.wait_closed()                        # type: ignore
+                await send_line(CONN.writer, {"message_type": "BYE"})  
+                await CONN.writer.drain()                              
+                CONN.writer.close()                                    
+                await CONN.writer.wait_closed()                        
             except Exception:
                 pass
             CONN.clear()
@@ -385,7 +432,9 @@ async def handle_command(line: str) -> None:
         await cmd_disconnect()
         return
 
+
 def _is_command(text: str) -> bool:
+    """Return True if a stdin line is a control command rather than an answer."""
     t = (text or "").strip().upper()
     if not t:
         return False
@@ -395,7 +444,9 @@ def _is_command(text: str) -> bool:
         return True
     return False
 
+
 async def stdin_reader():
+    """Register a readable callback for stdin that routes commands/answers into queues."""
     loop = asyncio.get_running_loop()
     done_fut: asyncio.Future[None] = loop.create_future()
 
@@ -427,7 +478,9 @@ async def stdin_reader():
             pass
         raise
 
+
 async def router_worker():
+    """Consume CMD_QUEUE and execute commands sequentially."""
     while True:
         line = await CMD_QUEUE.get()
         if line is None:
@@ -437,7 +490,9 @@ async def router_worker():
             return
         await handle_command(line)
 
+
 async def interactive_loop(first_line: Optional[str] = None) -> None:
+    """Launch stdin reader, command router, and wait until QUIT_EVENT is set."""
     t_stdin = asyncio.create_task(stdin_reader())
     t_router = asyncio.create_task(router_worker())
     t_quit = asyncio.create_task(QUIT_EVENT.wait())
@@ -452,10 +507,14 @@ async def interactive_loop(first_line: Optional[str] = None) -> None:
             if not t_quit.done():
                 await t_quit
 
+
 async def main_async() -> None:
+    """Entrypoint for the async client runtime."""
     await interactive_loop(None)
 
+
 def load_client_config(path: Path) -> Dict[str, Any]:
+    """Load client configuration JSON from file or exit with error."""
     try:
         cfg = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -466,7 +525,9 @@ def load_client_config(path: Path) -> Dict[str, Any]:
         sys.exit(1)
     return cfg
 
+
 def main():
+    """Parse args, load config, set globals, and run the async client."""
     args = sys.argv[1:]
     if not args or args[0] != "--config" or len(args) < 2:
         print("client.py: Configuration not provided", file=sys.stderr)
@@ -497,6 +558,7 @@ def main():
         asyncio.run(main_async())
     except KeyboardInterrupt:
         pass
+
 
 if __name__ == "__main__":
     main()
