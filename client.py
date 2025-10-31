@@ -376,7 +376,7 @@ async def stdin_reader():
                 done_fut.set_result(None)
             return
 
-        #line = line.rstrip("\r\n")
+        line = line.rstrip("\r\n")
         if _is_command(line):
             CMD_QUEUE.put_nowait(line)
         else:
