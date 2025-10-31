@@ -206,7 +206,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             break
 
         if mtype == "READY":
-            print(msg.get("info1", ""), flush=True)
+            print("[test]" + msg.get("info", ""), flush=True)
 
         elif mtype == "QUESTION":
             trivia = msg.get("trivia_question", "")
