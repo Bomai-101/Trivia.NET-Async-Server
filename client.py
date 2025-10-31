@@ -218,43 +218,62 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             tlimit = float(msg.get("time_limit", 0) or 0)
             print(trivia, flush=True)
 
+            # cancel previous answer task (if any)
+            global CURRENT_ANSWER_TASK
             if CURRENT_ANSWER_TASK and not CURRENT_ANSWER_TASK.done():
                 CURRENT_ANSWER_TASK.cancel()
             CURRENT_ANSWER_TASK = None
 
-            if CLIENT_MODE in {"auto", "ai"}:
+            # small helper
+            async def _submit(ans: Optional[str]) -> None:
+                if ans is None:
+                    return
+                if not CONN.is_connected() or QUIT_EVENT.is_set():
+                    return
+                await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+
+            # drain old answers for YOU mode so commentary doesn't leak
+            def _drain_ans_queue() -> None:
+                try:
+                    while True:
+                        ANS_QUEUE.get_nowait()
+                        ANS_QUEUE.task_done()
+                except asyncio.QueueEmpty:
+                    pass
+
+            if CLIENT_MODE == "ai":
+                async def _ai_send():
+                    try:
+                        ai_ans = await asyncio.wait_for(
+                            ask_ollama(short_q, qtype, tlimit),
+                            timeout=tlimit
+                        )
+                    except asyncio.TimeoutError:
+                        ai_ans = None
+                    await _submit(ai_ans)  # send exactly what Ollama returned; None means don't send
+                CURRENT_ANSWER_TASK = asyncio.create_task(_ai_send())
+
+            elif CLIENT_MODE == "auto":
                 async def _auto_send():
                     try:
-                        if QUIT_EVENT.is_set() or not CONN.is_connected():
-                            return
-                        if CLIENT_MODE == "ai":
-                            try:
-                                ai_ans = await asyncio.wait_for(
-                                    ask_ollama(short_q, qtype, tlimit),
-                                    timeout=tlimit
-                                )
-                            except asyncio.TimeoutError:
-                                ai_ans = None
-                            if ai_ans is not None and CONN.is_connected() and not QUIT_EVENT.is_set():
-                                await send_line(writer, {"message_type": "ANSWER", "answer": ai_ans})
-                            return
-                        # auto mode
                         ans = auto_answer(qtype, short_q)
-                        if CONN.is_connected() and not QUIT_EVENT.is_set():
-                            await send_line(writer, {"message_type": "ANSWER", "answer": ans})
                     except Exception:
-                        pass
-
+                        ans = ""
+                    await _submit(ans)  # always send (even empty string)
                 CURRENT_ANSWER_TASK = asyncio.create_task(_auto_send())
 
-            else:
+            else:  # YOU mode
                 _drain_ans_queue()
-                try:
-                    ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
-                except asyncio.TimeoutError:
-                    ans = ""
-                if CONN.is_connected():
-                    await send_line(writer, {"message_type": "ANSWER", "answer": ans})
+                async def _you_send():
+                    try:
+                        # get exactly one line within tlimit; empty string is a valid answer and must be sent
+                        ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
+                        await _submit(ans)
+                    except asyncio.TimeoutError:
+                        # no answer within time window -> do not send anything
+                        return
+                CURRENT_ANSWER_TASK = asyncio.create_task(_you_send())
+
 
         elif mtype == "RESULT":
             fb = msg.get("feedback", "")
