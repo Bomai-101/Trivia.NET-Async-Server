@@ -161,7 +161,7 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     def _do_request():
         try:
-            resp = requests.post(url, json=req_body_obj, timeout=float(tlimit))
+            resp = requests.post(url, json=req_body_obj, timeout=max(0.2, float(tlimit)))
             if resp.status_code != 200:
                 return None
             body_json = resp.json()
