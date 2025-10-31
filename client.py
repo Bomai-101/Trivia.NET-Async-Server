@@ -163,24 +163,22 @@ async def ask_ollama(short_question: str, qtype: str, tlimit: float) -> Optional
 
     def _do_request():
         try:
-            resp = requests.post(url, json=req_body_obj,
-                                 timeout=max(1.5, float(tlimit) + 0.5))
+            resp = requests.post(url, json=req_body_obj, timeout=max(1.5, float(tlimit) + 0.5))
             if resp.status_code != 200:
                 return None
             body = resp.json()
 
             if isinstance(body.get("message"), dict):
                 return body["message"].get("content", "")
-
             msgs = body.get("messages")
             if isinstance(msgs, list) and msgs and isinstance(msgs[-1], dict):
                 return msgs[-1].get("content", "")
-
             return None
         except Exception:
             return None
 
     return await asyncio.to_thread(_do_request)
+
 
 
 async def socket_reader_task(reader: asyncio.StreamReader) -> None:
