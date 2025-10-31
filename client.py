@@ -231,7 +231,7 @@ async def message_dispatcher(writer: asyncio.StreamWriter) -> None:
             else:
                 try:
                     ans = await asyncio.wait_for(ANS_QUEUE.get(), timeout=tlimit)
-                    ans = (ans or "").strip()
+                    ans = (ans or "")#.strip()
                 except asyncio.TimeoutError:
                     ans = ""
                 if ans:
@@ -376,7 +376,7 @@ async def stdin_reader():
                 done_fut.set_result(None)
             return
 
-        line = line.rstrip("\r\n")
+        #line = line.rstrip("\r\n")
         if _is_command(line):
             CMD_QUEUE.put_nowait(line)
         else:
