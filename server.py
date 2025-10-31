@@ -327,7 +327,11 @@ async def coordinator() -> None:
     qgap = CFG.get("question_interval_seconds", 0)
     ready_info_tpl = CFG.get("ready_info", "Game starts soon!")
     try:
-        ready_info = ready_info_tpl.format(question_interval_seconds=qgap, players=REQUIRED_PLAYERS)
+        ready_info = ready_info_tpl.format(
+            players=REQUIRED_PLAYERS,
+            question_seconds=qsec,
+            question_interval_seconds=qgap
+        )
     except Exception:
         ready_info = ready_info_tpl
     await broadcast({"message_type": "READY", "info": ready_info})
